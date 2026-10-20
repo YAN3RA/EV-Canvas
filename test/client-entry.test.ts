@@ -152,13 +152,44 @@ describe('客户端入口', () => {
     expect(opened).toEqual(['dsh-resource://evcanvas/canvas']);
   });
 
+  it('左侧栏导航项注册在 sidebar.panellist，排在三个内置项之后', async () => {
+    const { registered } = await loadClient();
+    const entry = registered.slots.find(item => item.options.name === 'sidebar.panellist');
+    expect(entry, '缺少 sidebar.panellist：左栏不会出现入口').toBeDefined();
+    // 内置三项是 0 / 10 / 20，我们必须更大才排在后面
+    expect(entry.options.order).toBeGreaterThan(20);
+    expect(typeof entry.options.label).toBe('function');
+    expect(entry.options.label()).toBe('EV Canvas');
+    // 图标位渲染出 svg，不是空白
+    const icon = entry.component();
+    expect(icon.type).toBe('span');
+    expect(icon.children[0].type).toBe('svg');
+  });
+
+  it('主面板 key 与左栏导航项 id 一致（不一致点了就是空白）', async () => {
+    const { registered } = await loadClient();
+    const entry = registered.slots.find(item => item.options.name === 'sidebar.panellist');
+    const main = registered.slots.find(item => item.options.name === 'main');
+    expect(main, '缺少 main 注册：点左栏会切到空白面板').toBeDefined();
+    expect(main.options.key).toBe(entry.options.id);
+    const panel = main.component();
+    expect(panel.type).toBe('div');
+    expect(panel.props.style.width).toBe('100%');
+  });
+
   it('每处注册都包在 effect/inject 里，便于宿主卸载时回收', async () => {
     const { registered } = await loadClient();
-    // 1 个右栏 tab 类型 + 3 个插槽（对话视图 / 右栏正文 / 新标签页菜单）
+    // 1 个右栏 tab 类型 + 5 个插槽（左栏导航 / 主面板 / 对话视图 / 右栏正文 / 新标签页菜单）
     expect(registered.tabs).toHaveLength(1);
-    expect(registered.slots).toHaveLength(3);
+    expect(registered.slots).toHaveLength(5);
     const names = registered.slots.map(item => item.options.name).sort();
-    expect(names).toEqual(['conversation.view', 'sidebar.right.pane.tab', 'sidebar.right.tab.menu.item']);
+    expect(names).toEqual([
+      'conversation.view',
+      'main',
+      'sidebar.panellist',
+      'sidebar.right.pane.tab',
+      'sidebar.right.tab.menu.item',
+    ]);
     const labels = registered.effects.map(item => item.label);
     expect(labels.some(label => /tab type/.test(label))).toBe(true);
   });

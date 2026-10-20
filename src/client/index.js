@@ -38,6 +38,8 @@ window.__ModuleLoader__.load({
     const ADDRESS_PREFIX = `dsh-resource://${TAB_KIND}/`;
     /** 对话顶栏视图的 id（与「对话/轨迹/上下文/编队」并列的那个）。 */
     const VIEW_ID = 'evcanvas';
+    /** 左侧栏导航项与主面板共用的 id（`sidebar.panellist` 与 `main` 的 key 必须是它）。 */
+    const PANEL_ID = 'evcanvas';
 
     /** 画布页面地址（同源，由宿主侧静态路由提供）。 */
     const PAGE_URL = '/evcanvas/';
@@ -75,10 +77,45 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 对话顶栏「视图」的正文：与右栏正文是同一个画布，只是挂的位置不同。
+     * 左侧栏导航项 + 主面板的图标。
      *
-     * 为什么两处都注册：用户既可以直接在会话顶栏切到画布（不离开会话），
-     * 也可以把画布作为右栏标签页常驻。两者渲染同一份内容，不存在第二套状态。
+     * 红框里那组（插件 / 自动化任务 / 上下文洞察）就是 `sidebar.panellist`：
+     * 每个条目是一个图标按钮，点击后 `ctx.layout.selectPanel(id)` 把主面板
+     * 切到对应 key 的 `main` 槽位。所以入口的正文不在这里，而在 `main`。
+     */
+    function CanvasPanelIcon() {
+      return React.createElement(
+        'span',
+        {
+          'aria-hidden': true,
+          style: { display: 'inline-flex', width: 20, height: 20, alignItems: 'center', justifyContent: 'center' },
+        },
+        React.createElement(
+          'svg',
+          { viewBox: '0 0 24 24', width: 18, height: 18, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          // 一个四格画布意象
+          React.createElement('rect', { x: 3, y: 4, width: 8, height: 7, rx: 1.5 }),
+          React.createElement('rect', { x: 13, y: 4, width: 8, height: 7, rx: 1.5 }),
+          React.createElement('rect', { x: 3, y: 13, width: 8, height: 7, rx: 1.5 }),
+          React.createElement('rect', { x: 13, y: 13, width: 8, height: 7, rx: 1.5 }),
+        ),
+      );
+    }
+
+    /** 主面板正文：占满面板区。 */
+    function CanvasPanel() {
+      return React.createElement(
+        'div',
+        { style: { display: 'flex', width: '100%', height: '100%', minHeight: 0 } },
+        CanvasBody(),
+      );
+    }
+
+    /**
+     * 对话顶栏「视图」的正文：与主面板是同一个画布，只是挂的位置不同。
+     *
+     * 保留这一处是因为它同样是有用的入口（不离开会话就能切到画布），
+     * 且与左栏主面板渲染同一份内容，不存在第二套状态。
      */
     function CanvasView() {
       return CanvasBody();
@@ -87,11 +124,26 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'sidebarRightTabs'],
       apply(ctx) {
-        // ① 注册对话顶栏的「视图」入口：与「对话 / 轨迹 / 上下文 / 编队」同一排。
-        //
-        // 这是用户明确要求的入口位置。宿主把 `conversation.view` 渲染成
-        // ConversationRoot 顶部那排 role="tab" 的按钮；`label` 决定按钮文字，
-        // `order` 决定排在哪个位置（编队是 30，我们排它后面）。
+        // ① 左侧栏导航项：这是用户指定的位置（插件 / 自动化任务 / 上下文洞察那一组）。
+        ctx.slots.inject('sidebar.panellist', () =>
+          ctx.slots.register(
+            {
+              name: 'sidebar.panellist',
+              id: PANEL_ID,
+              // 三个内置项分别是 0 / 10 / 20；排 30 落在最后
+              order: 30,
+              label: () => 'EV Canvas',
+            },
+            CanvasPanelIcon,
+          ),
+        );
+
+        // ② 主面板正文：`main` 是 keyed 槽位，key 必须等于上面的 panel id。
+        ctx.slots.inject('main', () =>
+          ctx.slots.register({ name: 'main', key: PANEL_ID }, CanvasPanel),
+        );
+
+        // ③ 对话顶栏的视图位（保留：不离开会话也能切到画布）
         ctx.slots.inject('conversation.view', () =>
           ctx.slots.register(
             {
