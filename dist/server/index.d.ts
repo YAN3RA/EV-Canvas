@@ -24,6 +24,11 @@ export interface PluginConfig {
     autoProjection: boolean;
     projectionWorkspaceTitle: string;
     trustedHosts: string[];
+    /**
+     * 媒体资产根目录（可选）。缺省时取 `dataFile` 同级的 `assets/`，
+     * 让备份/迁移/回滚能当作一个整体处理。
+     */
+    assetsDir?: string;
 }
 export { PLUGIN_META, ROUTE_PREFIX };
 /**

@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { MAX_TITLE_LENGTH } from '../shared/constants.js';
 import { InputError, NotFoundError, RevisionConflictError } from '../shared/errors.js';
 import { PLUGIN_META, ROUTE_PREFIX } from '../shared/meta.js';
+import { createAssetStore, handleMediaUpload, MAX_MEDIA_BYTES } from './media-route.js';
 import { listSessionLogs, loadProjectableSession, normalizeSessionId } from './session-log-reader.js';
 import { WorkspaceStore, type ProjectableEvent, type ProjectableSession } from './workspace-store.js';
 
@@ -31,6 +32,11 @@ export interface PluginConfig {
   autoProjection: boolean;
   projectionWorkspaceTitle: string;
   trustedHosts: string[];
+  /**
+   * 媒体资产根目录（可选）。缺省时取 `dataFile` 同级的 `assets/`，
+   * 让备份/迁移/回滚能当作一个整体处理。
+   */
+  assetsDir?: string;
 }
 
 // 元信息与路由前缀的唯一来源是 `shared/meta.ts`（前端也 import 它，
@@ -148,6 +154,36 @@ async function readJson(req: AsyncIterable<Uint8Array>, maxBytes = MAX_BODY_BYTE
     throw new InputError('请求必须是 JSON 对象');
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * 读取二进制请求体（媒体上传专用）。
+ *
+ * 与 `readJson` 分开而不是复用一个「通用读取器」，原因有三条，每条都对应
+ * 一个真实会踩的坑：
+ *
+ * 1. **上限不同且必须更大**。`MAX_BODY_BYTES` 是 32 KiB，图片/视频动辄几 MB，
+ *    沿用会让所有上传都报「请求内容过大」——而错误信息指向的还是对的，
+ *    排查时很容易以为是自己文件的问题。
+ * 2. **超限要在读流的**过程中**就中断**，不能先全读进内存再判断。否则一个
+ *    500 MB 的请求会先把宿主内存打爆，然后才被告知「太大」。
+ * 3. **不能按 UTF-8 解码**。二进制数据一旦过 `toString('utf8')` 就会丢字节，
+ *    存进去的资产等于损坏，而校验（魔数、SHA-256）都在下游，发现不了。
+ */
+async function readBinary(req: AsyncIterable<Uint8Array>, maxBytes: number): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for await (const chunk of req) {
+    length += chunk.length;
+    if (length > maxBytes) {
+      // 抛专用错误：调用方据此回 413，而不是当成普通 400。
+      const error = new InputError('上传内容超过大小上限');
+      (error as InputError & { code?: string }).code = 'PAYLOAD_TOO_LARGE';
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 /** 信封解包：旧版契约是 `{ body, ...envelope }` 的扁平形状。 */
@@ -372,6 +408,16 @@ export function apply(ctx: unknown, config: PluginConfig): void {
   const dataFile = typeof config?.dataFile === 'string' && config.dataFile !== '' ? config.dataFile : '';
   if (dataFile === '') throw new Error('evcanvas: config.dataFile 必须是非空路径');
 
+  /**
+   * 媒体资产根目录：与 `workspaces.json` **同级**的 `assets/`。
+   *
+   * 为什么同级而不是放在数据文件旁边另建一棵树：两者生命周期一致（一起备份、
+   * 一起迁移、一起回滚），放同级最省心。`assets.ts` 内部再按
+   * `<sha256 前两位>/<sha256>.<ext>` 分桶，避免单目录堆积几万个文件。
+   */
+  const assetsRoot =
+    typeof config?.assetsDir === 'string' && config.assetsDir !== '' ? config.assetsDir : join(dirname(dataFile), 'assets');
+
   const reportFlushFailure = (error: Error): void => {
     host.logger.warn(error instanceof Error ? error : new Error(String(error)));
   };
@@ -466,6 +512,50 @@ export function apply(ctx: unknown, config: PluginConfig): void {
         const workspaceId = decodeIdSegment(layout[1] ?? '');
         const body = await readJson(readable, MAX_DOCUMENT_BYTES);
         sendJson(response, 200, await store.updateLayout(workspaceId, unwrapEnvelope(body) as Record<string, unknown>, body));
+        return;
+      }
+
+      /**
+       * ── 媒体上传（S0-3）──────────────────────────────────────────────
+       *
+       * 只接一条 `POST /api/media`：请求体是**原始二进制**，不是 multipart、
+       * 也不是 base64 包在 JSON 里。理由：
+       *   - multipart 要引入解析依赖，而宿主侧约定是「零 runtime 依赖」；
+       *   - base64 会把体积膨胀 33%，且要先整体解码才能校验，
+       *     等于把「先看大小再决定」的保护让掉了；
+       *   - 文件名与类型走 header（`x-evcanvas-filename` / `content-type`），
+       *     足够表达，不牺牲可读性。
+       *
+       * 这里的职责只有三件：读流 → 交给 `handleMediaUpload` → 按它返回的
+       * 状态码写响应。校验、原子写、去重全部在 `assets.ts` 里，不在此重写。
+       */
+      if (path === `${ROUTE_PREFIX}/api/media` && method === 'POST') {
+        const headerValue = (name: string): string | undefined => {
+          const value = raw.headers[name];
+          return typeof value === 'string' ? value : undefined;
+        };
+        let data: Buffer;
+        try {
+          data = await readBinary(readable, MAX_MEDIA_BYTES);
+        } catch (error) {
+          // 超限是 413 不是 400：客户端据此可以提示「换个文件」而不是「格式错」。
+          if ((error as { code?: string }).code === 'PAYLOAD_TOO_LARGE') {
+            sendJson(response, 413, {
+              error: `上传内容超过 ${Math.round(MAX_MEDIA_BYTES / 1024 / 1024)} MiB 上限`,
+            });
+            return;
+          }
+          throw error;
+        }
+        const result = await handleMediaUpload(
+          { storeAsset: createAssetStore(assetsRoot), assetsRoot },
+          {
+            ...(headerValue('x-evcanvas-filename') === undefined ? {} : { filename: headerValue('x-evcanvas-filename') }),
+            ...(headerValue('content-type') === undefined ? {} : { contentType: headerValue('content-type') }),
+            data,
+          },
+        );
+        sendJson(response, result.status, result.body);
         return;
       }
 
