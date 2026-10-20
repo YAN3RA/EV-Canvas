@@ -94,12 +94,27 @@ describe('byCwd 收编仍在工作', () => {
     expect(after[0]!.projection.threads.map(thread => thread.dshSessionId)).toContain(UUID_A);
   });
 
-  it('未归属会话与已归属会话同 cwd 时，收编只发生在该会话自己的归属上', async () => {
-    // 混合场景：A 有归属、B 没有，二者同 cwd。修复后必须是两行，
-    // 且 B 不在 A 里。这条与 workspace-isolation 的泄漏用例互补：
-    // 那边断言「不许吞」，这边断言「该收的仍然收了」。
+  /**
+   * 混合场景：A 有归属、B 没有，二者同 cwd。修复后必须是两行，且 B 不在 A 里。
+   * 与 workspace-isolation 的泄漏用例互补：那边断言「不许吞」，这边断言
+   * 「该收的仍然收了」。同时它覆盖 `boundSessionOf` 的「明确归别人 → 拒绝收编」分支。
+   */
+  it('未归属会话与已归属会话同 cwd 时，收编不越过归属边界', async () => {
     const store = await makeStore();
     const cwd = 'C:\\work\\mixed';
+
+    // 第一轮：两者都没有归属 → 同 cwd 合成一行（老路径，符合预期）。
+    await store.syncSessions(
+      [
+        { id: UUID_A, cwd, title: '有归属' },
+        { id: UUID_B, cwd, title: '没归属' },
+      ],
+      [],
+      [],
+    );
+    expect(rows(store)).toHaveLength(1);
+
+    // 第二轮：宿主把 A 划给 ws-A，B 依旧没有归属。
     await store.syncSessions(
       [
         { id: UUID_A, cwd, title: '有归属' },
@@ -118,5 +133,52 @@ describe('byCwd 收编仍在工作', () => {
     // B 绝不能出现在 A 里 —— 这就是原缺陷的直接表现。
     expect(bound!.projection.threads.map(thread => thread.dshSessionId)).not.toContain(UUID_B);
     expect(unbound!.projection.threads.map(thread => thread.dshSessionId)).toContain(UUID_B);
+  });
+
+  /**
+   * 回归：**回填出来的会话不能被判成「归属别人」**。
+   *
+   * 这是修 S0-7 时差点引入的回归，也是本文件最重要的用例。
+   *
+   * `sessions.list()` 只报活跃会话，所以 S0-6 回填的旧会话在本批次里**没有
+   * 归属声明**。第一版判据要求「行内所有会话都归属同一宿主工作区」，于是这些
+   * 行被拒绝收编，画布分裂成「未分组(19)」+「工作区(1)」两份，而且活跃会话
+   * 会在两边各出现一次。
+   *
+   * 正确语义：**没声明 ≠ 归别人**。只有「明确归了另一个工作区」才该拒绝收编。
+   */
+  it('回填会话（本批次无归属声明）不阻止遗留行被收编', async () => {
+    const store = await makeStore();
+    const cwd = 'C:\\work\\backfilled';
+
+    // 第一轮：只有 1 个活跃会话，没有工作区 → 未绑定行。
+    await store.syncSessions([{ id: UUID_A, cwd, title: '活跃会话' }], [], []);
+    expect(rows(store)).toHaveLength(1);
+
+    // 第二轮：宿主报出工作区 A 且只声明 UUID_A；但该行里还有回填进来的
+    // UUID_B（模拟 S0-6 从磁盘补的历史，它在本批次没有归属声明）。
+    const row = rows(store)[0]!;
+    row.projection.threads.push({
+      id: 'thread-backfilled',
+      workspaceId: row.id,
+      dshSessionId: UUID_B,
+      title: '回填的历史会话',
+      messages: [],
+      pendingProcess: [],
+    } as unknown as (typeof row.projection.threads)[number]);
+
+    await store.syncSessions(
+      [{ id: UUID_A, cwd, title: '活跃会话' }],
+      [],
+      [{ id: 'ws-A', title: '工作区 A', sessionIds: [UUID_A] }],
+    );
+
+    const after = rows(store);
+    // 必须收编成一行：UUID_B 没有归属声明，不是「归别人」。
+    expect(after).toHaveLength(1);
+    expect(after[0]!.dshWorkspaceId).toBe('ws-A');
+    const ids = after[0]!.projection.threads.map(thread => thread.dshSessionId);
+    expect(ids).toContain(UUID_A);
+    expect(ids).toContain(UUID_B);
   });
 });

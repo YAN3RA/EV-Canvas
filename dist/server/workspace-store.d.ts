@@ -304,18 +304,36 @@ export declare class WorkspaceStore {
     /** Apply one complete listing to the projection. Removal is gated by `cleanup`. */
     applyDirectory(sessions: HostSessionEntry[], removedSessionIds: string[], hostWorkspaces: HostWorkspaceEntry[], cleanup: boolean): Promise<Record<string, unknown>[]>;
     /**
-     * 判断一个未绑定行（`dshWorkspaceId == null`）是不是 `hostWorkspaceId` 的
-     * **升级前遗留行**，也就是「可以安全收编」。
+     * 判断一个未绑定行（`dshWorkspaceId == null`）是否**可以**被 `hostWorkspaceId` 收编。
      *
-     * 判据：这个行里装的**所有**会话，在本批次里都归属同一个宿主工作区。
+     * ## 问题本质
      *
-     * 为什么用「全部」而不是「任一」：
-     *   - 全部命中 → 整行本来就是那个工作区的数据，收编后内容不变，只是补上绑定；
-     *   - 只要有一个会话不属于它 → 这一行里混进了别人的数据，收编就会把那个
-     *     会话一起搬进去。这正是 S0-7 泄漏缺陷的直接成因。
+     * `byCwd` 回退把「这一行没有宿主绑定」当成了「这一行属于那个宿主工作区」的
+     * 证据，但它分不清两种来源：
      *
-     * 空行（没有任何 thread）返回 `true`：空行收编不搬运任何数据，还能避免
-     * 升级后留下一堆空的「未分组」残壳。
+     *   - **遗留行**：升级前写下的，或 S0-6 从磁盘回填的。里面装的是宿主管不到的
+     *     历史会话 —— 收编是对的，否则老数据永久失联。
+     *   - **本批次未归属桶**：宿主当前确实没给这些会话分配工作区。收编就是越界：
+     *     用户在 A 里看到不属于它的卡片，删掉还会从「未分组」一起消失。
+     *
+     * ## 判据：行内有没有「宿主列出了、却没给它归属」的会话
+     *
+     * 这是唯一同时满足两个场景的判据：
+     *
+     *   - **有** → 这一行就是本批次的未归属桶，收编会把那些会话带进别人的工作区。
+     *   - **没有** → 行内的会话要么宿主压根管不到（回填的旧会话），要么已经明确
+     *     归了这个工作区。两种情况收编都只是补上绑定，不搬运别人的数据。
+     *
+     * ## 试过但不成立的三版（都是真实教训）
+     *
+     *   1. 「行内所有会话都归属同一宿主工作区」→ 拒绝收编回填行（回填会话没有
+     *      归属声明），画布分裂成「未分组」+「工作区」两份。
+     *   2. 「只否决明确归了别人的会话」→ 泄漏重现（未归属会话同样没有声明）。
+     *   3. 「按行是否本轮之前存在」→ 跨轮场景下未归属行同样早就在了，被误判成
+     *      遗留行，泄漏照旧。
+     *
+     * 前三版都在猜「这个会话属于谁」；正解是换个问法：「这个会话，宿主现在
+     * 到底有没有给它安排位置」。
      */
     private legacyRowBelongsTo;
     /** The locked/unlocked shared body: one complete listing written to the projection. */

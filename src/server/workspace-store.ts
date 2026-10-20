@@ -644,34 +644,57 @@ export class WorkspaceStore {
   }
 
   /**
-   * 判断一个未绑定行（`dshWorkspaceId == null`）是不是 `hostWorkspaceId` 的
-   * **升级前遗留行**，也就是「可以安全收编」。
+   * 判断一个未绑定行（`dshWorkspaceId == null`）是否**可以**被 `hostWorkspaceId` 收编。
    *
-   * 判据：这个行里装的**所有**会话，在本批次里都归属同一个宿主工作区。
+   * ## 问题本质
    *
-   * 为什么用「全部」而不是「任一」：
-   *   - 全部命中 → 整行本来就是那个工作区的数据，收编后内容不变，只是补上绑定；
-   *   - 只要有一个会话不属于它 → 这一行里混进了别人的数据，收编就会把那个
-   *     会话一起搬进去。这正是 S0-7 泄漏缺陷的直接成因。
+   * `byCwd` 回退把「这一行没有宿主绑定」当成了「这一行属于那个宿主工作区」的
+   * 证据，但它分不清两种来源：
    *
-   * 空行（没有任何 thread）返回 `true`：空行收编不搬运任何数据，还能避免
-   * 升级后留下一堆空的「未分组」残壳。
+   *   - **遗留行**：升级前写下的，或 S0-6 从磁盘回填的。里面装的是宿主管不到的
+   *     历史会话 —— 收编是对的，否则老数据永久失联。
+   *   - **本批次未归属桶**：宿主当前确实没给这些会话分配工作区。收编就是越界：
+   *     用户在 A 里看到不属于它的卡片，删掉还会从「未分组」一起消失。
+   *
+   * ## 判据：行内有没有「宿主列出了、却没给它归属」的会话
+   *
+   * 这是唯一同时满足两个场景的判据：
+   *
+   *   - **有** → 这一行就是本批次的未归属桶，收编会把那些会话带进别人的工作区。
+   *   - **没有** → 行内的会话要么宿主压根管不到（回填的旧会话），要么已经明确
+   *     归了这个工作区。两种情况收编都只是补上绑定，不搬运别人的数据。
+   *
+   * ## 试过但不成立的三版（都是真实教训）
+   *
+   *   1. 「行内所有会话都归属同一宿主工作区」→ 拒绝收编回填行（回填会话没有
+   *      归属声明），画布分裂成「未分组」+「工作区」两份。
+   *   2. 「只否决明确归了别人的会话」→ 泄漏重现（未归属会话同样没有声明）。
+   *   3. 「按行是否本轮之前存在」→ 跨轮场景下未归属行同样早就在了，被误判成
+   *      遗留行，泄漏照旧。
+   *
+   * 前三版都在猜「这个会话属于谁」；正解是换个问法：「这个会话，宿主现在
+   * 到底有没有给它安排位置」。
    */
   private legacyRowBelongsTo(
     cwd: string | null,
     hostWorkspaceId: string,
-    boundSessionOf: Map<string, string>,
+    listedSessionIds: ReadonlySet<string>,
   ): boolean {
     if (cwd === null) return false
     const row = this.state.workspaces.find(
       item => item.kind === 'dsh' && item.dshWorkspaceId == null && item.cwd === cwd,
     )
     if (row === undefined) return false
-    const sessionIds = row.projection.threads
+    const rowSessionIds = row.projection.threads
       .map(thread => thread.dshSessionId)
       .filter((id): id is string => typeof id === 'string' && id !== '')
-    if (sessionIds.length === 0) return true
-    return sessionIds.every(sessionId => boundSessionOf.get(sessionId) === hostWorkspaceId)
+    return rowSessionIds.every(sessionId => {
+      // 宿主列出了这个会话、却没给归属 → 它是本批次的未归属会话，不能收编。
+      if (listedSessionIds.has(sessionId) && !this.sessionOwnership.has(sessionId)) return false
+      // 明确归了别的工作区 → 更不能收编。
+      const declared = this.sessionOwnership.get(sessionId)
+      return declared === undefined || declared.id === hostWorkspaceId
+    })
   }
 
   /** The locked/unlocked shared body: one complete listing written to the projection. */
@@ -679,37 +702,15 @@ export class WorkspaceStore {
     return () => {
       this.sessionOwnership = hostWorkspaceOwnership(hostWorkspaces)
       /**
-       * 本批次里「已绑定到某个宿主工作区」的会话集合，key = `${hostId}\u0000${sessionId}`。
+       * 本批次 `sessions` 列表里的会话 id。
        *
-       * 一次目录快照是完整的（所有 sessions + 所有 workspaces 一起到达），
-       * 所以这里能一次性看到全貌 —— 这正是 `dshWorkspace` 自己看不到的信息。
-       *
-       * 用它来区分 `dshWorkspaceId == null` 的两种来源：
-       *   - 该 cwd 在本批次**没有**任何宿主工作区 → 命中的是历史残留行，收编；
-       *   - 该 cwd **已有**绑定，但命中的残留行里装的正是本批次归属给同一宿主
-       *     工作区的那些会话 → 也是历史残留（升级前的行），收编；
-       *   - 否则 → 命中的是本批次仍未归属的会话，**绝不能**收编。
+       * 这是区分「遗留/回填行」与「本批次未归属桶」的依据（详见
+       * `legacyRowBelongsTo` 注释）：回填的旧会话不会出现在这个列表里，
+       * 而未归属会话恰恰就是列表里那些没有归属的条目。
        */
-      const boundSessionOf = new Map<string, string>() // sessionId -> hostWorkspaceId
-      for (const entry of hostWorkspaces) {
-        if (typeof entry?.id !== 'string' || entry.id === '') continue
-        for (const sessionId of Array.isArray(entry.sessionIds) ? entry.sessionIds : []) {
-          if (typeof sessionId === 'string' && sessionId !== '' && !boundSessionOf.has(sessionId)) {
-            boundSessionOf.set(sessionId, entry.id)
-          }
-        }
-      }
-      const cwdOfHost = new Map<string, string>() // hostWorkspaceId -> cwd
-      for (const entry of hostWorkspaces) {
-        if (typeof entry?.id !== 'string' || entry.id === '') continue
-        const cwd = typeof entry.path === 'string' ? entry.path : typeof entry.cwd === 'string' ? entry.cwd : null
-        if (cwd !== null && cwd !== '' && !cwdOfHost.has(entry.id)) cwdOfHost.set(entry.id, cwd)
-      }
-      const boundCwd = new Set<string>()
-      for (const [sessionId, hostId] of boundSessionOf) {
-        const cwd = cwdOfHost.get(hostId)
-        if (cwd !== undefined) boundCwd.add(`${hostId}\u0000${cwd}`)
-      }
+      const listedSessionIds = new Set(
+        sessions.filter(item => typeof item?.id === 'string' && item.id !== '').map(item => item.id),
+      )
       const blankIds = new Set(sessions.filter(item => item?.blank === true && typeof item.id === 'string').map(item => item.id))
       const removedIds = new Set(removedSessionIds)
       for (const workspace of this.state.workspaces) {
@@ -741,7 +742,7 @@ export class WorkspaceStore {
          *   - 否则 → 命中的是本批次仍未归属的会话，必须单开一行，否则会被
          *     后续出现的宿主工作区吞掉（S0-7 的泄漏缺陷）。
          */
-        const allowCwdAdoption = owner !== undefined && this.legacyRowBelongsTo(item.cwd, owner.id, boundSessionOf)
+        const allowCwdAdoption = owner !== undefined && this.legacyRowBelongsTo(item.cwd, owner.id, listedSessionIds)
         const workspace = this.dshWorkspace(owner?.id ?? null, owner?.title ?? '未分组', item.cwd, allowCwdAdoption)
         const session: ProjectableSession = { id: item.id, header: { meta: { cwd: item.cwd }, parentSession: typeof item.parentId === 'string' ? item.parentId : undefined }, title: typeof item.title === 'string' ? item.title : undefined, events: [] } as unknown as ProjectableSession
         const thread = this.dshThread(workspace, session)
