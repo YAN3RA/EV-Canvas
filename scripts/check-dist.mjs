@@ -45,18 +45,23 @@ function hashOf(buffer) {
 }
 
 /** 1) 在当前工作目录重建（产物写进 dist/，与提交内容同一位置）。 */
-console.log('check-dist: 重新构建…');
-for (const [label, args] of [
-  ['tsc -p tsconfig.server.json', [join('node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.server.json']],
-  ['rewrite-alias', [join('scripts', 'rewrite-alias.mjs')]],
-  ['vite build', [join('node_modules', 'vite', 'bin', 'vite.js'), 'build']],
-]) {
-  const result = spawnSync(process.execPath, args, { cwd: ROOT, stdio: 'pipe', encoding: 'utf8' });
-  if (result.status !== 0) {
-    console.error(`check-dist: ${label} 失败`);
-    console.error(result.stdout?.slice(-2000) ?? '');
-    console.error(result.stderr?.slice(-2000) ?? '');
-    process.exit(1);
+// `--no-build` 只跳到比对阶段，用来验证产物内部的静态约束（如资源路径前缀）
+// 而不会先被重建覆盖。默认必须重建：不重建就是在比一份旧产物，等于没检查。
+const skipBuild = process.argv.includes('--no-build');
+console.log(skipBuild ? 'check-dist: 跳过重建，直接比对现有 dist/' : 'check-dist: 重新构建…');
+if (!skipBuild) {
+  for (const [label, args] of [
+    ['tsc -p tsconfig.server.json', [join('node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.server.json']],
+    ['rewrite-alias', [join('scripts', 'rewrite-alias.mjs')]],
+    ['vite build', [join('node_modules', 'vite', 'bin', 'vite.js'), 'build']],
+  ]) {
+    const result = spawnSync(process.execPath, args, { cwd: ROOT, stdio: 'pipe', encoding: 'utf8' });
+    if (result.status !== 0) {
+      console.error(`check-dist: ${label} 失败`);
+      console.error(result.stdout?.slice(-2000) ?? '');
+      console.error(result.stderr?.slice(-2000) ?? '');
+      process.exit(1);
+    }
   }
 }
 
@@ -85,6 +90,31 @@ for (const path of built) {
   if (committed !== fresh) changed.push(path);
 }
 
+/**
+ * 2a) 先查产物内部的资源路径。
+ *
+ * 放在与 git 比对**之前**且不走 `problems` 汇总：这条约束独立于「产物是否最新」，
+ * 即使产物与 HEAD 完全一致，路径错了也是错的。若混进 `problems`，它会被
+ * 「内容不一致」先一步 return 掉，等于这道守卫在最需要它的场景（改完没提交）
+ * 反而失效——本次就踩到了。
+ *
+ * 为什么需要它：`dist/ui/index.html` 里写 `/app.js` 时产物文件本身完整、哈希
+ * 也对得上，check-dist 全绿——但插件路由挂在 `/evcanvas/` 下，页面一打开就是
+ * 「脚本 404、浏览器弹出下载」。这类故障从「路由 200」到「产物一致」全部看起来
+ * 正常，只有真的在浏览器里打开才暴露，而那时已经装进宿主了。
+ */
+const PREFIX = '/evcanvas/';
+const html = await readFile(join(SHIPPED, 'ui', 'index.html'), 'utf8');
+const badRefs = [...html.matchAll(/(?:src|href)="(\/[^"]*)"/g)]
+  .map(match => match[1])
+  .filter(ref => !ref.startsWith(PREFIX));
+if (badRefs.length > 0) {
+  console.error(`check-dist: dist/ui/index.html 里的资源路径缺少 "${PREFIX}" 前缀`);
+  for (const ref of badRefs) console.error(`  - ${ref}`);
+  console.error('  原因通常是 vite.config.ts 没设 base，或 base 写错。');
+  process.exit(1);
+}
+
 const problems = [];
 if (missing.length > 0) problems.push(`新增产物未提交（${missing.length}）：${missing.slice(0, 6).join(', ')}`);
 if (stale.length > 0) problems.push(`已提交但构建不再产出（${stale.length}）：${stale.slice(0, 6).join(', ')}`);
@@ -96,4 +126,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`check-dist: ${built.length} 个产物与源码一致（已忽略 sourcemap）`);
+console.log(`check-dist: ${built.length} 个产物与源码一致（已忽略 sourcemap）；资源路径前缀正确`);

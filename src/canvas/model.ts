@@ -510,11 +510,26 @@ function threadsByIterationOrder(threads: readonly unknown[]): (Record<string, u
  */
 export function buildCanvasModel(snapshot: unknown = {}): CanvasModel {
   if (!isPlainObject(snapshot)) throw new TypeError('snapshot 必须是对象')
-  const projection = isPlainObject(snapshot['projection']) ? snapshot['projection'] : null
+  /**
+   * 宿主快照有两种形状，这里统一收口：
+   *   - 工作区文档本体：`{ projection, layout, ... }`（列表项 / 导出物）
+   *   - 单工作区接口的**信封**：`{ format, schemaVersion, workspace: { ... } }`
+   *
+   * 为什么要在这里兼容而不是只在前端剥一层：`GET /api/workspaces/<id>` 返回的是
+   * 信封，而 `buildCanvasModel` 的调用方不止前端一处（导出、测试夹具都用它）。
+   * 只在前端剥，别处照样会把信封当文档、得到一个空画布；而且这种错是**静默**的
+   * ——不报错，只是没有卡片，正是本项目最怕的「假成功」。
+   *
+   * 信封识别只看 `workspace` 是否为对象且**不是**数组：`workspace` 是工作区文档
+   * 的专属字段，别的形状不会碰巧带它。
+   */
+  const inner = isPlainObject(snapshot['workspace']) ? (snapshot['workspace'] as Record<string, unknown>) : null
+  const document = inner ?? snapshot
+  const projection = isPlainObject(document['projection']) ? document['projection'] : null
   const threads: readonly unknown[] = projection !== null && Array.isArray(projection['threads'])
     ? projection['threads']
-    : Array.isArray(snapshot['threads']) ? snapshot['threads'] : []
-  const layout = readLayout(snapshot)
+    : Array.isArray(document['threads']) ? document['threads'] : []
+  const layout = readLayout(document)
   const { cards, cardsById, threads: threadsSummary } = buildCards(threads, layout)
   const knownIds = new Set(cards.map(card => card.id))
   const unmatchedCardIds = Object.keys(layout.cards).filter(cardId => !knownIds.has(cardId))
@@ -535,12 +550,12 @@ export function buildCanvasModel(snapshot: unknown = {}): CanvasModel {
   })
   const annotationsById: Record<string, CanvasAnnotationView> = {}
   for (const annotation of annotations) annotationsById[annotation.id] = annotation
-  if (Array.isArray(snapshot['regions']) && snapshot['regions'].length !== layout.regions.length) skipped.push({ area: 'regions', reason: 'invalid' })
-  if (Array.isArray(snapshot['annotations']) && snapshot['annotations'].length !== layout.annotations.length) skipped.push({ area: 'annotations', reason: 'invalid' })
+  if (Array.isArray(document['regions']) && document['regions'].length !== layout.regions.length) skipped.push({ area: 'regions', reason: 'invalid' })
+  if (Array.isArray(document['annotations']) && document['annotations'].length !== layout.annotations.length) skipped.push({ area: 'annotations', reason: 'invalid' })
   return deepFreeze({
-    workspaceId: typeof snapshot['id'] === 'string' ? snapshot['id'] : (typeof snapshot['workspaceId'] === 'string' ? snapshot['workspaceId'] : null),
-    revision: isEventSeq(snapshot['revision']) ? snapshot['revision'] : null,
-    projectionEpoch: isEventSeq(snapshot['projectionEpoch']) ? snapshot['projectionEpoch'] : null,
+    workspaceId: typeof document['id'] === 'string' ? document['id'] : (typeof document['workspaceId'] === 'string' ? document['workspaceId'] : null),
+    revision: isEventSeq(document['revision']) ? document['revision'] : null,
+    projectionEpoch: isEventSeq(document['projectionEpoch']) ? document['projectionEpoch'] : null,
     viewport: layout.viewport,
     cards,
     cardsById,

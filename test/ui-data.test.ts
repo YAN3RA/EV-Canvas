@@ -67,6 +67,68 @@ describe('readLayoutBundle', () => {
   });
 });
 
+describe('buildCanvasModel 的信封解包', () => {
+  /**
+   * 回归：`GET /api/workspaces/<id>` 返回的是**信封**
+   * `{ format, schemaVersion, readOnly, migrationRequired, workspace: {...} }`，
+   * 而模型要的是 `workspace` 里面那份文档。
+   *
+   * 这个 bug 真实发生过：前端把信封直接喂给模型，模型在外层找不到 `projection`，
+   * 于是 `threads` 为空 → 画布空白，**且不报错**。属于最隐蔽的一类故障——
+   * 「接口 200、数据在、界面空」。
+   */
+  const thread = {
+    id: 'thread-1',
+    dshSessionId: 'f0b42e0b-8771-4ed6-9bba-d90b76ba468f',
+    dshSessionTitle: '测试会话',
+    messages: [{ id: 'm1', text: '第一轮提问', kind: 'user', sourceSeq: 1 }],
+  };
+
+  it('信封形状能解出卡片（前端真实调用形状）', () => {
+    const envelope = {
+      format: 'dsh-evcanvas',
+      schemaVersion: 1,
+      readOnly: false,
+      migrationRequired: false,
+      workspace: {
+        id: 'ws-1',
+        revision: 42,
+        projectionEpoch: 1,
+        projection: { threads: [thread] },
+        layout: { viewport: { x: 0, y: 0, zoom: 1 } },
+        regions: [],
+        annotations: [],
+      },
+    };
+    const model = buildCanvasModel(envelope);
+    expect(model.workspaceId).toBe('ws-1');
+    expect(model.revision).toBe(42);
+    expect(model.threads).toHaveLength(1);
+    expect(model.cards.length).toBeGreaterThan(0);
+  });
+
+  it('文档本体形状仍照常工作（不能为了信封破坏原路径）', () => {
+    const model = buildCanvasModel({
+      id: 'ws-2',
+      revision: 7,
+      projection: { threads: [thread] },
+      layout: { viewport: { x: 1, y: 2, zoom: 1.25 } },
+      regions: [],
+      annotations: [],
+    });
+    expect(model.workspaceId).toBe('ws-2');
+    expect(model.revision).toBe(7);
+    expect(model.threads).toHaveLength(1);
+    expect(model.viewport).toEqual({ x: 1, y: 2, zoom: 1.25 });
+  });
+
+  it('空信封不报错，给出空画布', () => {
+    const model = buildCanvasModel({ workspace: { id: 'ws-3', projection: { threads: [] } } });
+    expect(model.workspaceId).toBe('ws-3');
+    expect(model.cards).toEqual([]);
+  });
+});
+
 describe('patchLayout', () => {
   const originalFetch = globalThis.fetch;
 

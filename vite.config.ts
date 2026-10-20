@@ -9,6 +9,15 @@ import { fileURLToPath, URL } from 'node:url';
  */
 export default defineConfig({
   plugins: [react()],
+  /**
+   * 产物由宿主在 `/evcanvas/` 下提供，不是站点根。
+   *
+   * 必须设 `base`：Vite 默认产出 `/app.js`、`/assets/...` 这类**根绝对路径**，
+   * 而插件静态路由挂在 `/evcanvas/` 前缀下，于是 index.html 打得开、脚本全 404。
+   * 表现是「页面空白 / 浏览器弹出下载」，从「路由 200」上完全看不出来——
+   * 这是本项目反复记的那条教训：路由 200 不等于前端被提供。
+   */
+  base: '/evcanvas/',
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

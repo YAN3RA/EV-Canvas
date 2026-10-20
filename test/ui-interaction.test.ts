@@ -42,8 +42,9 @@ describe('多卡拖拽 → 一步撤销', () => {
 
     expect(patches).toHaveLength(3);
     // 逐卡补丁都带真实 before/after，撤销才可逆。
-    expect(patches[0].before).toEqual({ x: 0, y: 0 });
-    expect(patches[0].after).toEqual({ x: 40, y: 25 });
+    const first = patches[0]!;
+    expect(first.before).toEqual({ x: 0, y: 0 });
+    expect(first.after).toEqual({ x: 40, y: 25 });
   });
 
   it('位置没变的卡片不产生补丁（避免空写盘）', () => {
