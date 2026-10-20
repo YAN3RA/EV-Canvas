@@ -14,7 +14,9 @@
       "import": "./dist/server/index.js",
       "default": "./dist/server/index.js"
     },
-    "./client": "./src/client/index.js",
+    "./client": {
+      "default": "./src/client/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -30,12 +32,7 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-sidebar-right"
-      ]
+      "platform": "web"
     }
   },
   "scripts": {
