@@ -40,8 +40,9 @@ export type GenerationTask =
 export interface BaseNode {
   nodeId: string;
   kind: NodeKind;
-  x: number;
-  y: number;
+  /** D26 ⑤：允许 null，表示待自动布局 */
+  x: number | null;
+  y: number | null;
   width: number;
   height: number;
   zIndex: number;
