@@ -34,6 +34,8 @@ const SLIDER_MIN = 5;
 const SLIDER_MAX = 500;
 /** 判定「这是拖拽不是点击」的像素阈值；低于它按点击处理。 */
 const DRAG_THRESHOLD_PX = 3;
+/** 松手后等待模型追上目标位置的上限；超时即视为保存失败并释放预览。 */
+const PENDING_MOVE_TIMEOUT_MS = 3000;
 
 export interface CanvasSurfaceProps {
   model: CanvasModel | null;
@@ -125,11 +127,30 @@ export function CanvasSurface({
   const selectable = useMemo(() => toSelectable(model), [model]);
   const selectedSet = useMemo(() => new Set(selectedCardIds), [selectedCardIds]);
 
-  // 模型换了（切换工作区/重新加载）就跟随，除非用户正在拖拽。
+  /**
+   * 视图变换的**唯一**来源：本地手势状态。
+   *
+   * 不再从 `model.viewport` 回灌 —— 这是「拖空白画布放下就跳远」的根因。
+   *
+   * 踩过的坑：原先写 `useEffect(() => { if (dragging) return; setTransform(viewport) },
+   * [viewport.x, viewport.y, viewport.zoom, dragging])`。松手时 `setDragging(false)`
+   * 立刻执行，而此刻 `viewport` 仍是**保存前的旧值**（PATCH + reload 还没回来），
+   * effect 于是把画布弹回旧位置；等 reload 带回新 viewport 再跳过去 —— 一放一弹。
+   * 卡片那条路径我当时单独修了，pan 这条漏掉了。
+   *
+   * 现在本地手势是唯一权威：拖动时直接改 `transform`，松手提交，reload 不回灌。
+   * `hasViewportCommitRef` 保障「切换工作区」时仍然跟随：只有 workspaceId 变化才
+   * 用服务端 viewport 重置本地，同一工作区内的刷新不覆盖用户的视图。
+   */
+  const workspaceIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (dragging) return;
+    const workspaceId = model?.workspaceId ?? null;
+    if (workspaceId === workspaceIdRef.current) return;
+    workspaceIdRef.current = workspaceId;
     setTransform({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
-  }, [viewport.x, viewport.y, viewport.zoom, dragging]);
+    // 只在**换工作区**时同步一次；同一工作区的 viewport 更新不回灌（见上方注释）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model?.workspaceId]);
 
   /**
    * 模型追上目标后**同步**失效 `pendingMove`（不再用 effect）。
@@ -151,46 +172,23 @@ export function CanvasSurface({
     return settledNow ? null : pendingMove;
   }, [pendingMove, model]);
 
-  /** 兜底：3 秒未追上（保存失败）也要释放，避免预览永远卡住。 */
-  useEffect(() => {
-    if (pendingMove === null) return;
-    const timer = setTimeout(() => setPendingMove(null), 3000);
-    return () => clearTimeout(timer);
-  }, [pendingMove]);
-
   /**
-   * 诊断埋点（临时保留，定位「多选拖拽跳帧」用）。
+   * 兜底计时器：**只随 pendingMove 重建，不跟 model**。
    *
-   * 为什么需要它：单选正常、多选异常，两者代码路径只差 targets 的项数。
-   * 仅靠阅读代码已经错了两轮，必须拿真实时间线才能继续。
-   * 打开 DevTools console 即可看到每次拖拽的完整轨迹；定位后删除。
-   *
-   * 输出前缀固定为 `[evc-drag]`，便于过滤，且**只在控制台**，不进任何 UI。
+   * 踩过的坑：依赖写成 `[pendingMove, model]`，而会话投影在实时更新（`model`
+   * 每几十毫秒换一次），effect 的 cleanup 就不断清掉 timer 再重设 —— 3 秒兜底
+   * 永远走不到。控制台里 `[evc-drag]` 从 t=9754 一直打到 t=18954（9 秒）就是
+   * 这个现象。后果是 `pendingMove` 永久驻留：`pinned` 优先级高于 `dragPreview`，
+   * 于是**框选后再拖拽完全拖不动**，且卡片卡在虚拟坐标上直到刷新。
    */
-  const traceRef = useRef<{ t: number; phase: string; detail: unknown }[]>([]);
   useEffect(() => {
     if (pendingMove === null) return;
-    const now = performance.now();
-    const snapshot = pendingMove.targets.map(target => {
-      const position = getResolvedPosition(model, target.cardId);
-      return {
-        id: target.cardId,
-        target: { x: target.x, y: target.y },
-        model: position === null ? null : { x: position.x, y: position.y },
-        reached: position !== null && Math.abs(position.x - target.x) < 0.5 && Math.abs(position.y - target.y) < 0.5,
-      };
-    });
-    const entry = { t: Math.round(now), phase: 'pending-check', detail: snapshot };
-    traceRef.current.push(entry);
-    // 只在仍有未追上的项时打印，避免刷屏；全部追上的那次也打一条收尾。
-    console.info('[evc-drag]', entry);
-    const timer = setTimeout(() => {
-      if (traceRef.current.length === 0) return;
-      console.info('[evc-drag] trace', traceRef.current);
-      traceRef.current = [];
-    }, 3200);
+    const startedAt = Date.now();
+    const timer = setTimeout(() => setPendingMove(null), PENDING_MOVE_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [pendingMove, model]);
+    // 依赖只留 pendingMove 的身份变化；`startedAt` 仅为可读性保留。
+    void startedAt;
+  }, [pendingMove]);
 
   /** 提交视口变化。只在交互结束时落一次盘，避免拖拽过程中刷爆服务端。 */
   const commitViewport = useCallback(
@@ -200,16 +198,32 @@ export function CanvasSurface({
     [onViewportCommit],
   );
 
-  const onWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-    // 只按滚轮缩放；不让浏览器默认缩放叠加。
-    event.preventDefault();
-    const delta = -event.deltaY;
-    setTransform(previous => {
-      const zoom = clampZoom(previous.zoom * WHEEL_FACTOR_BASE ** (delta / 100));
-      // clampZoom 对非法输入返回 NaN —— 那是 bug，不是「用 1 兜底」的场景，
-      // 静默兜底会把一次计算错误藏起来，所以保持原值不变。
-      return Number.isFinite(zoom) ? { ...previous, zoom } : previous;
-    });
+  /**
+   * 滚轮缩放。
+   *
+   * **必须用原生 addEventListener + `{ passive: false }`**，不能挂在 React 的
+   * `onWheel` 上：React 19 把根容器的 wheel 监听注册为 passive，React 合成事件
+   * 里的 `preventDefault()` 会被浏览器忽略并刷出
+   * 「Unable to preventDefault inside passive event listener invocation」。
+   * 后果不只是脏日志——页面会同时被浏览器整体缩放，画布缩放叠加浏览器缩放，
+   * 观感上就是「拖/滚一下位置全乱」。
+   */
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const host = surfaceRef.current;
+    if (host === null) return;
+    const onWheelNative = (event: WheelEvent): void => {
+      event.preventDefault();
+      const delta = -event.deltaY;
+      setTransform(previous => {
+        const zoom = clampZoom(previous.zoom * WHEEL_FACTOR_BASE ** (delta / 100));
+        // clampZoom 对非法输入返回 NaN —— 那是 bug，不是「用 1 兜底」的场景，
+        // 静默兜底会把一次计算错误藏起来，所以保持原值不变。
+        return Number.isFinite(zoom) ? { ...previous, zoom } : previous;
+      });
+    };
+    host.addEventListener('wheel', onWheelNative, { passive: false });
+    return () => host.removeEventListener('wheel', onWheelNative);
   }, []);
 
   /** 屏幕坐标 → world 坐标。框选与拖拽都要用。 */
@@ -445,8 +459,8 @@ export function CanvasSurface({
       </div>
 
       <div
+        ref={surfaceRef}
         className={`evc-canvas-surface${dragging ? ' is-dragging' : ''}`}
-        onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endGesture}
