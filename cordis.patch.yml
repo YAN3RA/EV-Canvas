@@ -1,0 +1,18 @@
+# EV Canvas only extends the Web profile: it reuses the existing DSH server
+# rather than running a second application process.
+#
+# 硬约束：
+#   - 不建第二监听端口（插件复用宿主服务）
+#   - 不建第二套会话目录（D2）
+#   - 不建第二调度器（D16）
+- insert:
+    - id: evcanvas
+      name: dsh-evcanvas
+      config:
+        # A profile can override this path in its own cordis.patch.yml.
+        dataFile: !!js dshHomePath('evcanvas/workspaces.json')
+        autoProjection: true
+        projectionWorkspaceTitle: DSH 任务
+        # Extra authorities the /evcanvas Host check accepts (host or host:port);
+        # localhost and 127.0.0.1 are always allowed.
+        trustedHosts: []

@@ -1,15 +1,52 @@
 {
-  "name": "ev-canvas",
-  "version": "0.0.0",
+  "name": "dsh-evcanvas",
+  "version": "0.0.1",
   "private": true,
-  "description": "EV Canvas — DSH unified session & multimedia creation workspace plugin (vNext, in progress)",
+  "description": "EV Canvas — DSH unified session & multimedia creation workspace plugin",
   "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./client": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md"
+  ],
   "scripts": {
-    "build": "echo \"skeleton: no build pipeline yet\" && exit 0",
-    "test": "echo \"skeleton: no test suites yet\" && exit 0"
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "pnpm": {
+    "verifyDepsBeforeRun": false
   }
 }

@@ -1,57 +1,103 @@
 # EV Canvas
 
-DSH 统一会话与多媒体创作工作台插件。
+DSH 统一会话与多媒体创作工作台插件（vNext）。
 
-> **当前状态：vNext 从零起步，尚未有功能代码。**
-> 本仓库是新起点（2026-10-20 建立）。旧实现 `dsh-synapnova@0.2.2` 封存为只读历史参考，其代码不在本仓库内。
+> **当前状态：脚手架，无业务功能。**
+> 46 项功能全部处于「未实现」，状态见 `Project Docs/1-需求/vnext功能.md`。
+> 不要把这个 README 里描述的结构当成「已完成」的证据。
 
-## 这是什么
+---
 
-一个 DSH 插件：把 DSH 原生会话投影成画布卡片，并在同一张画布上提供思维节点、多媒体节点与生成配置。
+## 技术栈
 
-**三条不可退让的边界：**
-
-1. **会话内容权威永远在 DSH。** 插件只保存投影与布局，不伪造、不改写会话历史。
-2. **凭证权威永远在 DSH。** API Key 只在宿主，前端请求不携带；导出包不含 Key。
-3. **不引入第二调度器。** 不内嵌 Agent 循环，不新增常驻端口，所有 DSH 追问走原生公开 Session API。
-
-## 与旧实现的关系
-
-| 项 | 旧 | 新 |
+| 层 | 选型 | 说明 |
 |---|---|---|
-| 仓库 | `YAN3RA/dsh-synapnova`（改名后为 `YAN3RA/EV-Canvas` 的历史线） | `YAN3RA/EV-Canvas` |
-| 版本 | `0.2.2` | 待定（vNext） |
-| 技术栈 | 原生 JS，零 runtime 依赖 | React + TS + Vite 前端；Node/Cordis 宿主 |
-| 状态 | 封存，11 项宿主验收失败 | 开发中，未实现任何功能 |
+| 前端 | React 19 + TypeScript + Vite 6 | 由宿主侧栏以同源 iframe 加载 |
+| 宿主 | Node ≥20 + Cordis 插件 | **零 runtime 依赖**，react 只进前端产物 |
+| 测试 | Vitest 2 | 单线程池（Windows 沙箱下 fork 易 EPERM） |
 
-旧仓库的 tag `v0.2.0/1/2` 与 `baseline-0.2.2-11fail-20261020` 永不移动，作为追溯点保留。
+---
 
-## 打算做什么
+## 目录结构
 
-按 S0–S3 四级推进：
+```
+dsh-evcanvas/
+├── cordis.patch.yml          插件注册（插入宿主 Web profile）
+├── index.html                Vite 入口
+├── src/
+│   ├── shared/               ★ 共享契约（前端与宿主都用）
+│   │   ├── constants.ts      FORMAT / 限额 / 缩放参数
+│   │   ├── types.ts          八类节点 + 三类边 + 文档结构
+│   │   ├── errors.ts         错误类型
+│   │   └── session-id.ts     会话 ID 归一化（防旧版前缀陷阱）
+│   ├── server/               宿主侧（Cordis 插件）
+│   │   └── index.ts          注册入口（骨架）
+│   ├── host/                 宿主桥接（原生操作、投影）
+│   ├── canvas/               画布纯逻辑（模型、布局、命令）
+│   ├── export/               导出（PNG / Markdown / CSV / JSON）
+│   ├── ui/                   前端
+│   │   ├── main.tsx          React 挂载
+│   │   ├── App.tsx           骨架页
+│   │   ├── canvas/           画布组件
+│   │   ├── nodes/            节点渲染
+│   │   └── settings/         设置面板
+│   ├── i18n/                 中英双语字典
+│   ├── data/                 内置数据（提示词模板等）
+│   └── styles/               CSS 变量与基础样式
+└── test/                     Vitest 测试
+```
 
-| 级别 | 含义 | 内容 |
-|---|---|---|
-| **S0 地基** | 不做则后续全返工 | 统一节点模型、语义连线分流、媒体资产存储、持久化、会话投影、历史回填 |
-| **S1 发布门槛** | 不做不算可用版本 | 归档分离、多渠道配置、能力声明、双语、多选、撤销、主题、删小地图/搜索、自定义脚本 |
-| **S2 价值功能** | 显著提升价值 | 媒体节点、生成配置、生成链路、提示词库、上下文预览 |
-| **S3 增强** | 锦上添花 | 连线参与上下文（显式版）、why 检索、自动备份、跨设备同步等 |
+---
 
-完整功能清单与裁决记录在需求侧文档（见下）。
+## 命令
 
-## 明确不做
+```powershell
+# 安装（首次）
+pnpm install
 
-编辑既有问答 · 陈旧检测/依赖重放 · 随动评审 · 节点插件系统 · 画布助手侧栏 · PDF/DOCX 解析 · 只读 URL 分享 · 前台直连 API Key · 多部署形态
+# 类型检查
+pnpm exec tsc --noEmit
 
-## 文档
+# 测试
+pnpm exec vitest run
 
-需求与设计文档不在本仓库，存放于工作区 `Project Docs\`：
+# 构建前端产物（输出到 dist/ui/）
+pnpm exec vite build
 
-- 需求权威：`1-需求\HANDOFF.md`
-- 功能状态：`1-需求\总功能实现.md`
-- 功能方案（已裁决版）：`1-需求\功能对比与取舍\功能.md`
-- 架构基线：`2-设计\架构基线\`
+# 全量构建（类型检查 + 前端）
+pnpm run build
+```
+
+> **Windows 注意**：`pnpm exec` 每次会触发一次依赖校验安装，可加
+> `--config.verify-deps-before-run=false` 跳过，或直接调
+> `node node_modules/vite/bin/vite.js`、`node node_modules/typescript/bin/tsc`。
+
+---
+
+## 设计文档
+
+动手写任一部分之前先读：
+
+| 文档 | 内容 |
+|---|---|
+| `Project Docs/2-设计/S0-1-统一节点schema设计.md` | 八类节点 + 三类边契约（**写节点代码前必读**） |
+| `Project Docs/2-设计/vNext功能实现推敲.md` | 46 项功能的实现方式与依赖文件 |
+| `Project Docs/2-设计/旧版代码迁移清单.md` | 旧仓库哪些代码可搬、怎么搬 |
+| `Project Docs/2-设计/S1-9-平移缩放IC参考清单.md` | 平移缩放实测参数 |
+| `Project Docs/1-需求/HANDOFF.md` | 需求权威（D/FR/AC） |
+
+---
+
+## 硬约束
+
+1. **会话内容权威在 DSH** —— 插件只保存投影与布局，不伪造、不改写会话历史。
+2. **凭证权威在 DSH** —— 前端类型里不定义 API Key 字段，生成请求走宿主代理。
+3. **不建第二调度器** —— 禁止 `canvas-agent` / Codex 调度循环。
+4. **媒体不进 JSON** —— 图片/视频/音频存独立 asset store，`workspaces.json` 只存 `assetId`。
+5. **不建第二监听端口** —— 复用宿主服务。
+
+---
 
 ## 许可
 
-沿用上游 MIT 许可与版权声明。基于 [dsh-synapse](https://github.com/liangmianya/dsh-synapse) 演进，参考 [ThoughtDAG](https://github.com/chenxiachan/thoughtdag) 与 [Infinite Canvas](https://github.com/basketikun/infinite-canvas)。
+MIT。基于 [Synapse](https://github.com/liangmianya/dsh-synapse) 演进，参考 [ThoughtDAG](https://github.com/chenxiachan/thoughtdag) 与 [Infinite Canvas](https://github.com/basketikun/infinite-canvas)。

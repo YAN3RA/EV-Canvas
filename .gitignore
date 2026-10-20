@@ -1,24 +1,20 @@
-# 依赖
+# dependencies
 node_modules/
-pnpm-store/
 
-# 构建产物
+# build output
 dist/
-*.tgz
 
-# 临时与测试
-.tmp/
-.tmp-*/
+# test artifacts
 coverage/
+.tmp-test/
 *.log
 
-# 编辑器与系统
-.vscode/
-.idea/
+# editor / OS
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
 
-# 本地环境
+# local env
 .env
-.env.*
-!.env.example
+.env.local
