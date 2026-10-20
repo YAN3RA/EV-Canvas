@@ -19,8 +19,8 @@
 
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { FORMAT, MAX_TITLE_LENGTH, SCHEMA_VERSION } from '../shared/constants.js';
 import { InputError, NotFoundError, RevisionConflictError } from '../shared/errors.js';
+import { PLUGIN_META, ROUTE_PREFIX } from '../shared/meta.js';
 import { WorkspaceStore } from './workspace-store.js';
 
 /** 插件配置（来自 cordis.patch.yml） */
@@ -31,28 +31,15 @@ export interface PluginConfig {
   trustedHosts: string[];
 }
 
-/** 插件元信息，供宿主与前端共享 */
-export const PLUGIN_META = {
-  id: 'evcanvas',
-  name: 'dsh-evcanvas',
-  format: FORMAT,
-  schemaVersion: SCHEMA_VERSION,
-} as const;
+// 元信息与路由前缀的唯一来源是 `shared/meta.ts`（前端也 import 它，
+// 不能让前端顺着这里把 node:fs / workspace-store 拖进浏览器构建）。
+export { PLUGIN_META, ROUTE_PREFIX };
 
 /** Cordis 插件名（宿主用它标识注入的服务）。 */
-export const name = 'evcanvas';
+export const name = PLUGIN_META.id;
 
 /** 注入的宿主服务：只要 Web Server，不额外开端口/服务。 */
 export const inject = ['webServer'] as const;
-
-/**
- * 路由前缀。
- *
- * D12（包名/id/路由是否改为 `EV Canvas`）尚未裁决，所以这里先用与
- * `PLUGIN_META.id` 一致的短前缀；一旦 D12 定稿，改这一处即可，
- * 路由表全部由它派生，不会散落在各处。
- */
-export const ROUTE_PREFIX = `/${PLUGIN_META.id}`;
 
 /** 请求体上限：普通业务写 32KiB（与旧版共享解析器一致）。 */
 const MAX_BODY_BYTES = 32 * 1024;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { PLUGIN_META } from '../server/index.js';
+import { PLUGIN_META } from '../shared/meta.js';
 
 /**
  * 骨架 App。**没有任何功能**，只证明：

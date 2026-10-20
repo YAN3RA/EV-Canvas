@@ -26,8 +26,8 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "build:server": "tsc -p tsconfig.server.json",
+    "build": "tsc --noEmit && tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs && vite build",
+    "build:server": "tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
