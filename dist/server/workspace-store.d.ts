@@ -303,6 +303,21 @@ export declare class WorkspaceStore {
     applyDirectoryLocked(sessions: HostSessionEntry[], removedSessionIds: string[], hostWorkspaces: HostWorkspaceEntry[], cleanup: boolean): Promise<Record<string, unknown>[]>;
     /** Apply one complete listing to the projection. Removal is gated by `cleanup`. */
     applyDirectory(sessions: HostSessionEntry[], removedSessionIds: string[], hostWorkspaces: HostWorkspaceEntry[], cleanup: boolean): Promise<Record<string, unknown>[]>;
+    /**
+     * 判断一个未绑定行（`dshWorkspaceId == null`）是不是 `hostWorkspaceId` 的
+     * **升级前遗留行**，也就是「可以安全收编」。
+     *
+     * 判据：这个行里装的**所有**会话，在本批次里都归属同一个宿主工作区。
+     *
+     * 为什么用「全部」而不是「任一」：
+     *   - 全部命中 → 整行本来就是那个工作区的数据，收编后内容不变，只是补上绑定；
+     *   - 只要有一个会话不属于它 → 这一行里混进了别人的数据，收编就会把那个
+     *     会话一起搬进去。这正是 S0-7 泄漏缺陷的直接成因。
+     *
+     * 空行（没有任何 thread）返回 `true`：空行收编不搬运任何数据，还能避免
+     * 升级后留下一堆空的「未分组」残壳。
+     */
+    private legacyRowBelongsTo;
     /** The locked/unlocked shared body: one complete listing written to the projection. */
     directoryAction(sessions: HostSessionEntry[], removedSessionIds: string[], hostWorkspaces: HostWorkspaceEntry[], cleanup: boolean): () => Record<string, unknown>[];
     addMessage(threadId: string, text: unknown, envelope?: Record<string, unknown>): Promise<MutableThread>;
@@ -454,8 +469,25 @@ export declare class WorkspaceStore {
      * node. When this path has no host attribution at all (direct replay, tests
      * that drive the store without a host directory), keep the historical
      * per-cwd grouping instead of collapsing every session into one bucket.
+     *
+     * ## `allowCwdAdoption` 为什么必须由调用方显式传
+     *
+     * `byCwd` 回退本意只收「旧版本按 cwd 匹配留下的、没有 host 绑定的历史行」。
+     * 但 `dshWorkspaceId == null && cwd 相同` 这个条件**同时匹配**另一种情况：
+     * 本批次里确实还没有归属的会话（宿主还没把它分到任何工作区）。
+     *
+     * 两者形状一样，只看行本身无法区分，于是出过两个真实故障：
+     *   - **同批次顺序敏感**：未归属会话排在已归属会话之前时，整个未归属桶
+     *     被随后出现的宿主工作区吞掉；调换顺序就正常。
+     *   - **跨轮必现**：第一轮宿主只报会话、第二轮才报工作区，那个会话被收编。
+     * 后果是用户在 A 里看到不属于它的卡片，删掉还会连带从「未分组」消失。
+     *
+     * 所以把判断交给**知道本批次全貌**的调用方：`directoryAction` 能算出
+     * 「本批次里这个 cwd 是否已有真正绑定该 host id 的工作区」。若有，说明
+     * `byCwd` 命中的只可能是历史残留而不是本批次的未归属桶，才允许收编。
+     * 默认 `false` —— 默认不猜，猜错的代价是数据串味。
      */
-    dshWorkspace(hostWorkspaceId: string | null, fallbackTitle: string, cwd?: string | null): MutableWorkspace;
+    dshWorkspace(hostWorkspaceId: string | null, fallbackTitle: string, cwd?: string | null, allowCwdAdoption?: boolean): MutableWorkspace;
     /** Which projected workspace does one live/committed session belong to? */
     dshWorkspaceForSession(session: ProjectableSession, fallbackTitle?: string): MutableWorkspace;
     dshThread(workspace: MutableWorkspace, session: ProjectableSession): MutableThread;

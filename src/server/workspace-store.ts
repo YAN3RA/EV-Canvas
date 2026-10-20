@@ -643,10 +643,73 @@ export class WorkspaceStore {
     return this.mutate(this.directoryAction(sessions, removedSessionIds, hostWorkspaces, cleanup), { deferred: true }) as Promise<Record<string, unknown>[]>
   }
 
+  /**
+   * 判断一个未绑定行（`dshWorkspaceId == null`）是不是 `hostWorkspaceId` 的
+   * **升级前遗留行**，也就是「可以安全收编」。
+   *
+   * 判据：这个行里装的**所有**会话，在本批次里都归属同一个宿主工作区。
+   *
+   * 为什么用「全部」而不是「任一」：
+   *   - 全部命中 → 整行本来就是那个工作区的数据，收编后内容不变，只是补上绑定；
+   *   - 只要有一个会话不属于它 → 这一行里混进了别人的数据，收编就会把那个
+   *     会话一起搬进去。这正是 S0-7 泄漏缺陷的直接成因。
+   *
+   * 空行（没有任何 thread）返回 `true`：空行收编不搬运任何数据，还能避免
+   * 升级后留下一堆空的「未分组」残壳。
+   */
+  private legacyRowBelongsTo(
+    cwd: string | null,
+    hostWorkspaceId: string,
+    boundSessionOf: Map<string, string>,
+  ): boolean {
+    if (cwd === null) return false
+    const row = this.state.workspaces.find(
+      item => item.kind === 'dsh' && item.dshWorkspaceId == null && item.cwd === cwd,
+    )
+    if (row === undefined) return false
+    const sessionIds = row.projection.threads
+      .map(thread => thread.dshSessionId)
+      .filter((id): id is string => typeof id === 'string' && id !== '')
+    if (sessionIds.length === 0) return true
+    return sessionIds.every(sessionId => boundSessionOf.get(sessionId) === hostWorkspaceId)
+  }
+
   /** The locked/unlocked shared body: one complete listing written to the projection. */
   directoryAction(sessions: HostSessionEntry[], removedSessionIds: string[], hostWorkspaces: HostWorkspaceEntry[], cleanup: boolean): () => Record<string, unknown>[] {
     return () => {
       this.sessionOwnership = hostWorkspaceOwnership(hostWorkspaces)
+      /**
+       * 本批次里「已绑定到某个宿主工作区」的会话集合，key = `${hostId}\u0000${sessionId}`。
+       *
+       * 一次目录快照是完整的（所有 sessions + 所有 workspaces 一起到达），
+       * 所以这里能一次性看到全貌 —— 这正是 `dshWorkspace` 自己看不到的信息。
+       *
+       * 用它来区分 `dshWorkspaceId == null` 的两种来源：
+       *   - 该 cwd 在本批次**没有**任何宿主工作区 → 命中的是历史残留行，收编；
+       *   - 该 cwd **已有**绑定，但命中的残留行里装的正是本批次归属给同一宿主
+       *     工作区的那些会话 → 也是历史残留（升级前的行），收编；
+       *   - 否则 → 命中的是本批次仍未归属的会话，**绝不能**收编。
+       */
+      const boundSessionOf = new Map<string, string>() // sessionId -> hostWorkspaceId
+      for (const entry of hostWorkspaces) {
+        if (typeof entry?.id !== 'string' || entry.id === '') continue
+        for (const sessionId of Array.isArray(entry.sessionIds) ? entry.sessionIds : []) {
+          if (typeof sessionId === 'string' && sessionId !== '' && !boundSessionOf.has(sessionId)) {
+            boundSessionOf.set(sessionId, entry.id)
+          }
+        }
+      }
+      const cwdOfHost = new Map<string, string>() // hostWorkspaceId -> cwd
+      for (const entry of hostWorkspaces) {
+        if (typeof entry?.id !== 'string' || entry.id === '') continue
+        const cwd = typeof entry.path === 'string' ? entry.path : typeof entry.cwd === 'string' ? entry.cwd : null
+        if (cwd !== null && cwd !== '' && !cwdOfHost.has(entry.id)) cwdOfHost.set(entry.id, cwd)
+      }
+      const boundCwd = new Set<string>()
+      for (const [sessionId, hostId] of boundSessionOf) {
+        const cwd = cwdOfHost.get(hostId)
+        if (cwd !== undefined) boundCwd.add(`${hostId}\u0000${cwd}`)
+      }
       const blankIds = new Set(sessions.filter(item => item?.blank === true && typeof item.id === 'string').map(item => item.id))
       const removedIds = new Set(removedSessionIds)
       for (const workspace of this.state.workspaces) {
@@ -665,7 +728,21 @@ export class WorkspaceStore {
         // must not recreate a session that the user deliberately archived.
         if (this.state.hiddenSessionIds.includes(item.id)) continue
         const owner = this.sessionOwnership.get(item.id)
-        const workspace = this.dshWorkspace(owner?.id ?? null, owner?.title ?? '未分组', item.cwd)
+        /**
+         * `allowCwdAdoption` 的判据 —— 区分「历史残留行」与「本批次未归属桶」。
+         *
+         * 只看行本身分不出来（两者都是 `dshWorkspaceId == null && cwd 相同`），
+         * 必须看本批次全貌：
+         *
+         *   - 该 cwd 在本批次没有任何宿主工作区 → 是残留，收编；
+         *   - 该 cwd 有绑定，且**这个残留行里装的所有会话**都归属同一个宿主
+         *     工作区 → 说明它就是那个工作区在升级前留下的行，收编（否则老数据
+         *     会永久失联，画布内容分裂成「未分组」+「工作区」两份）；
+         *   - 否则 → 命中的是本批次仍未归属的会话，必须单开一行，否则会被
+         *     后续出现的宿主工作区吞掉（S0-7 的泄漏缺陷）。
+         */
+        const allowCwdAdoption = owner !== undefined && this.legacyRowBelongsTo(item.cwd, owner.id, boundSessionOf)
+        const workspace = this.dshWorkspace(owner?.id ?? null, owner?.title ?? '未分组', item.cwd, allowCwdAdoption)
         const session: ProjectableSession = { id: item.id, header: { meta: { cwd: item.cwd }, parentSession: typeof item.parentId === 'string' ? item.parentId : undefined }, title: typeof item.title === 'string' ? item.title : undefined, events: [] } as unknown as ProjectableSession
         const thread = this.dshThread(workspace, session)
         if (typeof item.title === 'string' && item.title.trim() !== '') {
@@ -1298,18 +1375,45 @@ export class WorkspaceStore {
    * node. When this path has no host attribution at all (direct replay, tests
    * that drive the store without a host directory), keep the historical
    * per-cwd grouping instead of collapsing every session into one bucket.
+   *
+   * ## `allowCwdAdoption` 为什么必须由调用方显式传
+   *
+   * `byCwd` 回退本意只收「旧版本按 cwd 匹配留下的、没有 host 绑定的历史行」。
+   * 但 `dshWorkspaceId == null && cwd 相同` 这个条件**同时匹配**另一种情况：
+   * 本批次里确实还没有归属的会话（宿主还没把它分到任何工作区）。
+   *
+   * 两者形状一样，只看行本身无法区分，于是出过两个真实故障：
+   *   - **同批次顺序敏感**：未归属会话排在已归属会话之前时，整个未归属桶
+   *     被随后出现的宿主工作区吞掉；调换顺序就正常。
+   *   - **跨轮必现**：第一轮宿主只报会话、第二轮才报工作区，那个会话被收编。
+   * 后果是用户在 A 里看到不属于它的卡片，删掉还会连带从「未分组」消失。
+   *
+   * 所以把判断交给**知道本批次全貌**的调用方：`directoryAction` 能算出
+   * 「本批次里这个 cwd 是否已有真正绑定该 host id 的工作区」。若有，说明
+   * `byCwd` 命中的只可能是历史残留而不是本批次的未归属桶，才允许收编。
+   * 默认 `false` —— 默认不猜，猜错的代价是数据串味。
    */
-  dshWorkspace(hostWorkspaceId: string | null, fallbackTitle: string, cwd: string | null = null): MutableWorkspace {
+  dshWorkspace(
+    hostWorkspaceId: string | null,
+    fallbackTitle: string,
+    cwd: string | null = null,
+    allowCwdAdoption = false,
+  ): MutableWorkspace {
     // Only a real host id may key the lookup: `null` means "no attribution on
     // this path", where every unbound row would otherwise collide into one.
     if (hostWorkspaceId !== null) {
       const existing = this.state.workspaces.find(item => item.kind === 'dsh' && item.dshWorkspaceId === hostWorkspaceId)
       if (existing !== undefined) return existing
     }
-    const byCwd = this.state.workspaces.find(item => item.kind === 'dsh' && item.dshWorkspaceId == null && item.cwd === cwd)
-    if (byCwd !== undefined) {
-      if (hostWorkspaceId !== null) byCwd.dshWorkspaceId = hostWorkspaceId
-      return byCwd
+    // 无归属（`null`）时仍按 cwd 归并：这是「宿主完全没给工作区」的老路径，
+    // 每个 cwd 自成一桶，不会串到别的宿主工作区里去。
+    // 有归属时必须由调用方确认本批次该 cwd 无新绑定，才允许收编历史残留。
+    if (hostWorkspaceId === null || allowCwdAdoption) {
+      const byCwd = this.state.workspaces.find(item => item.kind === 'dsh' && item.dshWorkspaceId == null && item.cwd === cwd)
+      if (byCwd !== undefined) {
+        if (hostWorkspaceId !== null) byCwd.dshWorkspaceId = hostWorkspaceId
+        return byCwd
+      }
     }
     const now = new Date().toISOString()
     const workspace = newWorkspace({
