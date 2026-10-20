@@ -31,12 +31,18 @@ const ROOT = resolve(process.cwd());
 const STAGE = join(ROOT, 'release', 'stage');
 const OUT_DIR = join(ROOT, 'release');
 
-/** 打进包里的产物目录（相对仓库根）。 */
-const INCLUDE_DIRS = ['dist/server', 'dist/shared', 'dist/ui'];
+/**
+ * 打进包里的产物目录（相对仓库根）。
+ *
+ * `src/client` 也必须带上：它是**尚未编译的客户端入口**（裸 `__ModuleLoader__`
+ * 写法，由宿主浏览器侧装载，不经过我们的构建），`package.json` 的
+ * `exports['./client']` 直接指向它。漏掉它 = 侧栏永远没有入口。
+ */
+const INCLUDE_DIRS = ['dist/server', 'dist/shared', 'dist/ui', 'src/client'];
 /** 单独拷贝的文件。 */
 const INCLUDE_FILES = ['cordis.patch.yml', 'README.md'];
-/** 运行时必需的 package.json 字段。 */
-const KEEP_FIELDS = ['name', 'version', 'description', 'license', 'type', 'engines', 'main', 'exports', 'files'];
+/** 运行时必需的 package.json 字段（`dsh` 必须保留：bundle 与 client 声明都在里面）。 */
+const KEEP_FIELDS = ['name', 'version', 'description', 'license', 'type', 'engines', 'main', 'exports', 'files', 'dsh'];
 
 async function exists(path) {
   try {
