@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+pnpm-store/
+
+# 构建产物
+dist/
+*.tgz
+
+# 临时与测试
+.tmp/
+.tmp-*/
+coverage/
+*.log
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地环境
+.env
+.env.*
+!.env.example

@@ -1,0 +1,15 @@
+{
+  "name": "ev-canvas",
+  "version": "0.0.0",
+  "private": true,
+  "description": "EV Canvas — DSH unified session & multimedia creation workspace plugin (vNext, in progress)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "echo \"skeleton: no build pipeline yet\" && exit 0",
+    "test": "echo \"skeleton: no test suites yet\" && exit 0"
+  }
+}
