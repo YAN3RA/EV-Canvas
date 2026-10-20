@@ -153,12 +153,39 @@ describe('apply 挂载', () => {
     expect(res.state.headers.location).toBe('/evcanvas/');
   });
 
-  it('入口页返回 HTML 骨架', async () => {
+  it('入口页返回 HTML（产物缺失时明确提示未构建，不假装有功能）', async () => {
     const res = fakeResponse();
     await ctx.routes.get('exact:/evcanvas/').handler(fakeRequest(), res);
     expect(res.state.status).toBe(200);
     expect(res.state.headers['content-type']).toMatch(/text\/html/);
     expect(res.state.body).toMatch(/EV Canvas/);
+    // 测试环境下 dist/ui 可能不存在；两种情况都必须自洽：
+    //   有产物 → 真实 index.html（含 #root 与构建脚本）
+    //   无产物 → 明确告知「前端产物未就位」，绝不能是「已加载」这种假信号
+    if (/未就位/.test(res.state.body)) {
+      expect(res.state.body).toMatch(/npm run build/);
+    } else {
+      expect(res.state.body).toMatch(/id="root"/);
+    }
+  });
+
+  it('静态资源路由存在，且路径穿越与非法扩展名一律 404', async () => {
+    expect(ctx.routes.has('prefix:/evcanvas/assets')).toBe(true);
+    expect(ctx.routes.has('exact:/evcanvas/app.js')).toBe(true);
+
+    const route = ctx.routes.get('prefix:/evcanvas/assets');
+    const cases = [
+      '/evcanvas/assets/../../package.json',
+      '/evcanvas/assets/..%2Fpackage.json',
+      '/evcanvas/assets/app.js/../../../secret',
+      '/evcanvas/assets/evil.sh',
+      '/evcanvas/assets/',
+    ];
+    for (const url of cases) {
+      const res = fakeResponse();
+      await route.handler(fakeRequest({ url }), res);
+      expect(res.state.status, `应拒绝：${url}`).toBe(404);
+    }
   });
 });
 

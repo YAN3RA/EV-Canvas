@@ -56,15 +56,36 @@ const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
 /**
  * 可被浏览器请求的静态模块白名单。
  *
- * **没有任何路由把 URL 映射到任意文件路径。** 浏览器能拿到的只有这张表里的
- * 固定条目；表外的请求一律 404。这是旧版 `MODULES` 白名单的直接沿用，
+ * **没有任何路由把 URL 映射到任意文件路径。** 浏览器能拿到的只有白名单里的
+ * 固定条目；表外请求一律 404。这是旧版 `MODULES` 白名单的直接沿用，
  * 也是 FR-13「拒绝目录穿越」在路由层的落点。
  *
- * vNext 前端是 Vite 产物，开发期由 Vite 自己的 dev server 提供，
- * 生产期由 `dist/ui` 交给宿主静态资源。这张表只负责「共享模块也能被
- * 浏览器按需取到」这件事，目前为空表示没有单独暴露的源码模块。
+ * vNext 前端是 Vite 产物（`dist/ui`），构建后其文件集合是**已知且封闭**的：
+ * `index.html` + `app.js` + `assets/<name>-<hash>.<ext>`。因此这里不再硬编码
+ * 具体文件名，而是按「前缀 + 安全文件名」的规则放行——仍然不接受任何 `..`、
+ * 分隔符或非白名单扩展名。
  */
 const MODULES = new Map<string, string>([]);
+
+/** Vite 产物根（相对本模块：`dist/server/` → `../ui/`）。 */
+const UI_ROOT = new URL('../ui/', import.meta.url);
+
+/** 允许从 `dist/ui/assets/` 提供的扩展名。 */
+const ASSET_EXTENSIONS = new Set(['.css', '.js', '.woff2', '.woff', '.ttf', '.svg', '.png', '.map']);
+
+/** 资产文件名只允许 `[A-Za-z0-9._-]`，杜绝任何路径语义。 */
+const ASSET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+const CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.map': 'application/json; charset=utf-8',
+});
 
 /** 一个已解码的路径段：拒绝任何能逃出单段的字符。 */
 function decodeIdSegment(segment: string): string {
@@ -258,10 +279,29 @@ export function apply(ctx: unknown, config: PluginConfig): void {
     }
   };
 
-  // 入口页：目前只有骨架页，真实 UI 由 Vite 产物提供（S1）。
-  const page = (): string =>
-    `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>EV Canvas</title></head>` +
-    `<body><div id="app"></div><p style="font:13px system-ui;padding:16px">EV Canvas 骨架已加载。功能实现按 S0 → S3 推进。</p></body></html>`;
+  /**
+   * 读取 `dist/ui` 里的真实前端产物。
+   *
+   * 为什么不再返回硬编码骨架页：宿主看到的必须就是用户真正会跑的那份 UI。
+   * 之前这里返回一句「骨架已加载」，于是「路由 200」掩盖了「前端根本没被提供」
+   * 这一事实——属于最容易被误读成「已实现」的那类假成功。
+   *
+   * 产物缺失时**明确报错**，不做静默降级：宁可让页面显示「未构建」，
+   * 也不要让人以为功能已经可用。
+   */
+  const readUiFile = async (relativePath: string): Promise<{ body: Uint8Array; contentType: string }> => {
+    const url = new URL(relativePath, UI_ROOT);
+    const body = new Uint8Array(await readFile(url));
+    const extension = relativePath.slice(relativePath.lastIndexOf('.'));
+    return { body, contentType: CONTENT_TYPES[extension] ?? 'application/octet-stream' };
+  };
+
+  const uiMissingPage = (): string =>
+    `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>EV Canvas</title></head>` +
+    `<body style="font:13px system-ui;padding:16px">` +
+    `<p><strong>前端产物未就位。</strong></p>` +
+    `<p>请先运行 <code>npm run build</code>，再重装插件。</p>` +
+    `</body></html>`;
 
   host.effect(() => host.webServer.register({ kind: 'exact', path: ROUTE_PREFIX, handler: (_req: never, res: never) => {
     const response = res as unknown as ResLike;
@@ -269,9 +309,45 @@ export function apply(ctx: unknown, config: PluginConfig): void {
     response.end();
   } }), 'evcanvas: redirect');
 
-  host.effect(() => host.webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/`, handler: (_req: never, res: never) => {
-    sendFile(res as unknown as ResLike, 'text/html; charset=utf-8', page());
+  host.effect(() => host.webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/`, handler: async (_req: never, res: never) => {
+    const response = res as unknown as ResLike;
+    try {
+      const html = await readUiFile('index.html');
+      sendFile(response, html.contentType, html.body);
+    } catch {
+      sendFile(response, 'text/html; charset=utf-8', uiMissingPage());
+    }
   } }), 'evcanvas: page');
+
+  /** `/evcanvas/assets/<name>` — 只放行单段、白名单扩展名的文件名。 */
+  host.effect(() => host.webServer.register({ kind: 'prefix', path: `${ROUTE_PREFIX}/assets`, handler: async (req: never, res: never) => {
+    const response = res as unknown as ResLike;
+    const rawUrl = String((req as { url?: string })?.url ?? '');
+    const name = rawUrl.slice(`${ROUTE_PREFIX}/assets/`.length).split('?')[0] ?? '';
+    const dot = name.lastIndexOf('.');
+    const extension = dot >= 0 ? name.slice(dot) : '';
+    if (!ASSET_NAME_RE.test(name) || !ASSET_EXTENSIONS.has(extension)) {
+      sendJson(response, 404, { error: '资源不存在' });
+      return;
+    }
+    try {
+      const asset = await readUiFile(`assets/${name}`);
+      sendFile(response, asset.contentType, asset.body);
+    } catch {
+      sendJson(response, 404, { error: '资源不存在' });
+    }
+  } }), 'evcanvas: assets');
+
+  /** 前端入口脚本。名字由 Vite 配置固定为 `app.js`。 */
+  host.effect(() => host.webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/app.js`, handler: async (_req: never, res: never) => {
+    const response = res as unknown as ResLike;
+    try {
+      const script = await readUiFile('app.js');
+      sendFile(response, script.contentType, script.body);
+    } catch {
+      sendJson(response, 404, { error: '前端入口脚本不存在，请先构建' });
+    }
+  } }), 'evcanvas: app.js');
 
   for (const [path, file] of MODULES) {
     host.effect(() => host.webServer.register({ kind: 'exact', path, handler: async (_req: never, res: never) => {
