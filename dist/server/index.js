@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { MAX_TITLE_LENGTH } from '../shared/constants.js';
 import { InputError, NotFoundError, RevisionConflictError } from '../shared/errors.js';
 import { PLUGIN_META, ROUTE_PREFIX } from '../shared/meta.js';
+import { listSessionLogs, loadProjectableSession, normalizeSessionId } from './session-log-reader.js';
 import { WorkspaceStore } from './workspace-store.js';
 // 元信息与路由前缀的唯一来源是 `shared/meta.ts`（前端也 import 它，
 // 不能让前端顺着这里把 node:fs / workspace-store 拖进浏览器构建）。
@@ -127,6 +128,28 @@ async function readJson(req, maxBytes = MAX_BODY_BYTES) {
 function unwrapEnvelope(body) {
     return body['body'] ?? body;
 }
+/**
+ * 推断 DSH 会话日志根目录（`~/.dsh/sessions`）。
+ *
+ * 为什么不用宿主 API：`ctx.sessions` 只暴露 `list()`，没有「给我日志根目录」
+ * 这种能力。而 S0-6 要读旧会话，唯一的合法来源就是磁盘。
+ *
+ * 优先级：`DSH_SESSIONS_DIR` 环境变量（便于测试与自定义部署）→ `DSH_HOME`
+ * → 用户主目录下的 `.dsh`。**都拿不到就返回 null**，由调用方明确报告跳过，
+ * 而不是猜一个路径去读 —— 读到错误的目录会静默产生「0 个会话」的假象。
+ */
+function sessionLogRoot() {
+    const fromEnv = process.env['DSH_SESSIONS_DIR'];
+    if (typeof fromEnv === 'string' && fromEnv !== '')
+        return fromEnv;
+    const dshHome = process.env['DSH_HOME'];
+    if (typeof dshHome === 'string' && dshHome !== '')
+        return join(dshHome, 'sessions');
+    const home = process.env['USERPROFILE'] ?? process.env['HOME'];
+    if (typeof home === 'string' && home !== '')
+        return join(home, '.dsh', 'sessions');
+    return null;
+}
 /** 判断 `ctx` 是否具备我们需要的宿主能力。 */
 function asContext(ctx) {
     if (ctx === null || typeof ctx !== 'object')
@@ -225,6 +248,58 @@ function startSessionProjection(host, store, workspaceTitle, autoProjection) {
     // 冷启动补历史：插件装好之前就存在的会话也要出现在画布上。
     for (const session of sessions.list())
         replaySession(session);
+    /**
+     * S0-6 历史回填：`sessions.list()` 只给**当前活跃**会话，重启前的会话读不到，
+     * 于是画布只显示 1 个而磁盘上躺着十几个。这里补读磁盘日志。
+     *
+     * 三处刻意的取舍：
+     *
+     * 1. **异步、不阻塞启动**。读几百 MB 日志要几秒，`apply()` 里同步读完会让
+     *    宿主启动卡住。这里 fire-and-forget 并单独 catch，失败只记日志。
+     * 2. **跳过已投影的会话**。活跃会话刚被 `replaySession` 投影过，再读磁盘会
+     *    重复投影出第二份卡片。判据用归一化后的 id（磁盘目录名带 `session-`
+     *    前缀，store 里是裸 uuid）。
+     * 3. **失败不静默**。整个回填最坏的结果是画布少几张卡片，用户会以为是
+     *    「投影坏了」。所以任何失败都写进 logger，而不是吞掉。
+     */
+    const backfillFromDisk = async () => {
+        const sessionsRoot = sessionLogRoot();
+        if (sessionsRoot === null) {
+            // 拿不到根目录时明说：否则用户只会看到「旧会话不见了」，无从判断原因。
+            host.logger.warn(new Error('evcanvas: 无法确定会话日志根目录，S0-6 历史回填已跳过（只显示活跃会话）'));
+            return;
+        }
+        const active = new Set();
+        for (const session of sessions.list()) {
+            const target = session;
+            if (typeof target.id === 'string')
+                active.add(normalizeSessionId(target.id));
+        }
+        const entries = await listSessionLogs(sessionsRoot);
+        let restored = 0;
+        for (const entry of entries) {
+            // `entry.sessionId` 保留磁盘目录名原文（可能带 `session-` 前缀），
+            // 与活跃会话的裸 uuid 必须归一化后比较，否则同一会话会被投影两遍。
+            if (active.has(normalizeSessionId(entry.sessionId)))
+                continue;
+            try {
+                const projectable = await loadProjectableSession(entry);
+                const generation = store.projectionGeneration;
+                const projectionEpoch = store.projectionEpochFor(projectable);
+                await store.projectSession(projectable, 0, workspaceTitle, projectionEpoch, generation);
+                restored += 1;
+            }
+            catch (error) {
+                // 单个会话坏掉不能中断其余回填 —— 一个损坏的日志不该让整批历史消失。
+                host.logger.warn(new Error(`evcanvas: 历史回填跳过 ${entry.sessionId}（${error instanceof Error ? error.message : String(error)}）`));
+            }
+        }
+        if (restored > 0) {
+            // 只记 warn 通道：宿主 logger 契约里没有 info，新增可选方法会变成空壳。
+            host.logger.warn(new Error(`evcanvas: 历史回填补入 ${restored} 个会话`));
+        }
+    };
+    void backfillFromDisk().catch(fail);
 }
 /**
  * 宿主注册入口。
