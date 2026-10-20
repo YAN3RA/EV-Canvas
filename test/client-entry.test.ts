@@ -102,7 +102,7 @@ describe('客户端入口', () => {
     expect(view.options.id).toBe('evcanvas');
     // label 是函数（宿主延迟求值，便于切语言）
     expect(typeof view.options.label).toBe('function');
-    expect(view.options.label()).toBe('EV Canvas');
+    expect(view.options.label()).toBe('无限画布');
     // order 必须大于编队的 30，排在它后面
     expect(view.options.order).toBeGreaterThan(30);
     // 正文渲染出来是画布
@@ -159,7 +159,7 @@ describe('客户端入口', () => {
     // 内置三项是 0 / 10 / 20，我们必须更大才排在后面
     expect(entry.options.order).toBeGreaterThan(20);
     expect(typeof entry.options.label).toBe('function');
-    expect(entry.options.label()).toBe('EV Canvas');
+    expect(entry.options.label()).toBe('无限画布');
     // 图标位渲染出 svg，不是空白
     const icon = entry.component();
     expect(icon.type).toBe('span');

@@ -41,6 +41,15 @@ window.__ModuleLoader__.load({
     /** 左侧栏导航项与主面板共用的 id（`sidebar.panellist` 与 `main` 的 key 必须是它）。 */
     const PANEL_ID = 'evcanvas';
 
+    /**
+     * 用户可见的显示名。
+     *
+     * 只影响 UI 文案，**不改任何 id**：`PANEL_ID` / `TAB_ID` / 地址前缀都已写进
+     * 宿主的面板选择记录与右栏布局，改名会让人已打开的标签失效。D12 定稿前
+     * 内部标识一律保持 `evcanvas`。
+     */
+    const DISPLAY_NAME = '无限画布';
+
     /** 画布页面地址（同源，由宿主侧静态路由提供）。 */
     const PAGE_URL = '/evcanvas/';
 
@@ -58,7 +67,7 @@ window.__ModuleLoader__.load({
     function CanvasBody() {
       return React.createElement('iframe', {
         src: PAGE_URL,
-        title: 'EV Canvas',
+        title: DISPLAY_NAME,
         // 占满右栏；样式走内联，避免向宿主页面注入全局 CSS
         style: {
           display: 'block',
@@ -132,7 +141,7 @@ window.__ModuleLoader__.load({
               id: PANEL_ID,
               // 三个内置项分别是 0 / 10 / 20；排 30 落在最后
               order: 30,
-              label: () => 'EV Canvas',
+              label: () => DISPLAY_NAME,
             },
             CanvasPanelIcon,
           ),
@@ -150,7 +159,7 @@ window.__ModuleLoader__.load({
               name: 'conversation.view',
               id: VIEW_ID,
               order: 40,
-              label: () => 'EV Canvas',
+              label: () => DISPLAY_NAME,
             },
             CanvasView,
           ),
@@ -165,7 +174,7 @@ window.__ModuleLoader__.load({
               patterns: [`dsh-resource://${TAB_KIND}/**`],
               priority: 'plugin',
               canOpen: address => parseAddress(address) !== undefined,
-              title: () => 'EV Canvas',
+              title: () => DISPLAY_NAME,
             }),
           'evcanvas: right-pane tab type',
         );
@@ -207,7 +216,7 @@ window.__ModuleLoader__.load({
                   },
                 },
                 React.createElement('span', { 'aria-hidden': true }, '◫'),
-                React.createElement('span', null, 'EV Canvas 画布'),
+                React.createElement('span', null, DISPLAY_NAME),
               ),
           ),
         );

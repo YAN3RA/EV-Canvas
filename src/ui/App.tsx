@@ -118,7 +118,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="evc-root" data-theme={theme}>
       <header className="evc-header">
-        <span className="evc-title">EV Canvas</span>
+        <span className="evc-title">无限画布</span>
         <span className="evc-badge">{PLUGIN_META.id}</span>
         {statusLabel !== null ? <span className="evc-status">{statusLabel}</span> : null}
         <span className="evc-spacer" />
