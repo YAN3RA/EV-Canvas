@@ -67,17 +67,19 @@ interface PendingMove {
   targets: { cardId: string; x: number; y: number }[];
 }
 
-/** 与 `CanvasSurface` 渲染层同口径：有 pending 时用绝对目标坐标。 */
+/** 与 `CanvasSurface` 渲染层同口径：拖拽中叠相对位移，松手后用绝对目标。 */
 function renderedPosition(
   modelPosition: { x: number; y: number },
   cardId: string,
   pending: PendingMove | null,
+  dragPreview: { dx: number; dy: number } | null = null,
 ): { x: number; y: number } {
   const pinned = pending?.targets.find(target => target.cardId === cardId);
-  // 绝对目标：模型未追上时提前画在目标位置；追上后与模型坐标重合（同一个值）。
-  // 不能用「模型位置 + 相对位移」—— 追上后会叠第二次，卡片二次跳动。
-  if (pinned === undefined || pending === null) return modelPosition;
-  return { x: pinned.x, y: pinned.y };
+  // 绝对目标优先：模型未追上时提前画在目标位置，追上后与模型坐标重合。
+  if (pending !== null && pinned !== undefined) return { x: pinned.x, y: pinned.y };
+  // 拖拽中（未松手）才用相对位移。
+  if (dragPreview !== null) return { x: modelPosition.x + dragPreview.dx, y: modelPosition.y + dragPreview.dy };
+  return modelPosition;
 }
 
 /** 与 `CanvasSurface` effect 同口径：模型是否已追上全部目标。 */
@@ -124,5 +126,74 @@ describe('松手后的防跳帧', () => {
 
   it('没有 pending 时渲染位置就是模型位置（不引入常驻偏移）', () => {
     expect(renderedPosition({ x: 7, y: 9 }, 'a', null)).toEqual({ x: 7, y: 9 });
+  });
+
+  /**
+   * 回归：`pendingMove` 释放后，**残留的 dragPreview 不得再生效**。
+   *
+   * 这条抓的是真实发生过的「松手后瞬间跳远」：松手时只设了 pendingMove、
+   * 忘了清 dragPreview。有 pending 时 pinned 优先，看起来正常；但 pending 一旦
+   * 释放（模型追上或 3s 超时），残留的相对位移就在**已含位移的新位置**上
+   * 再叠一次 —— 卡片正好多走一个 dx/dy。
+   *
+   * 断言方式：模拟「模型已追上 + pending 已释放 + dragPreview 忘了清」，
+   * 渲染结果若等于新位置 + dx，就是 bug；正确实现要求松手时两者一起清。
+   */
+  it('释放 pending 后不得再叠相对位移（防「松手跳远」）', () => {
+    const target = { x: 140, y: 125 };
+    // 正确路径：松手时 setDragPreview(null) 与 setPendingMove(...) 成对发生。
+    const correct = renderedPosition(target, 'a', null, null);
+    expect(correct).toEqual({ x: 140, y: 125 });
+
+    // 错误路径（曾经真实存在）：pending 已清但 dragPreview 残留，
+    // 在新位置 (140,125) 上再叠加 (40,25) → 180,150，正是用户看到的「跳远」。
+    const buggy = renderedPosition(target, 'a', null, { dx: 40, dy: 25 });
+    expect(buggy).not.toEqual({ x: 140, y: 125 });
+    expect(buggy).toEqual({ x: 180, y: 150 });
+  });
+
+  it('pending 生效期间 dragPreview 即使残留也被绝对目标压住（视觉不跳）', () => {
+    const target = { x: 140, y: 125 };
+    // 松手瞬间模型仍是旧位置；此时若 dragPreview 还在，pinned 优先，画面仍正确。
+    // 这解释了为什么这个 bug 只在「pending 释放那一刻」才暴露。
+    const rendered = renderedPosition({ x: 100, y: 100 }, 'a', pending, { dx: 40, dy: 25 });
+    expect(rendered).toEqual(target);
+  });
+
+  /**
+   * 整条时间线逐帧验证：松手前后的可见位置必须**单调**走到目标并停住，
+   * 不允许出现「回弹」或「越过目标」。
+   *
+   * 这条是上面几条的合体，直接对应用户看到的抖动。它之所以必要：
+   * 单点断言各自都能过，但真实故障正是**帧与帧之间**的跳变 —— 比如
+   * effect 释放 pending 造成的多渲染一帧旧值。逐帧算出坐标再检查相邻帧
+   * 位移方向，才能覆盖这类问题。
+   */
+  it('逐帧时间线：松手后不回弹、不越过目标', () => {
+    const origin = { x: 100, y: 100 };
+    const target = { x: 140, y: 125 };
+    const pendingMove: PendingMove = { dx: 40, dy: 25, targets: [{ cardId: 'a', x: 140, y: 125 }] };
+
+    // 帧 1-3：拖拽中，模型仍是旧位置，dragPreview 叠相对位移。
+    const frames: { x: number; y: number }[] = [];
+    for (const dx of [10, 25, 40]) frames.push(renderedPosition(origin, 'a', null, { dx, dy: Math.round(dx * 0.625) }));
+
+    // 帧 4：松手瞬间 —— dragPreview 清空、pending 接管、模型仍是旧值。
+    frames.push(renderedPosition(origin, 'a', pendingMove, null));
+    // 帧 5：网络往返中，模型未变。
+    frames.push(renderedPosition(origin, 'a', pendingMove, null));
+    // 帧 6：reload 落地，模型到达目标，pending 同步失效（同一帧）。
+    frames.push(renderedPosition(target, 'a', null, null));
+
+    // 松手后（帧 4 起）位置不得回退、不得超过目标。
+    const afterRelease = frames.slice(3);
+    for (let i = 1; i < afterRelease.length; i++) {
+      expect(afterRelease[i]!.x).toBeGreaterThanOrEqual(afterRelease[i - 1]!.x);
+      expect(afterRelease[i]!.x).toBeLessThanOrEqual(target.x);
+    }
+    // 松手那一帧必须**正好**在目标上，不能掉回起点。
+    expect(afterRelease[0]).toEqual(target);
+    // 末帧停在目标，不越界。
+    expect(frames.at(-1)).toEqual(target);
   });
 });

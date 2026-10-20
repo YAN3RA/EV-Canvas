@@ -132,30 +132,31 @@ export function CanvasSurface({
   }, [viewport.x, viewport.y, viewport.zoom, dragging]);
 
   /**
-   * 模型追上目标位移后释放 `pendingMove`。
+   * 模型追上目标后**同步**失效 `pendingMove`（不再用 effect）。
    *
-   * 判据用「所有被拖卡片是否已经落在目标坐标上」而不是定时器：定时器要么太短
-   * （网络慢时照样闪），要么太长（松手后位置发虚、下次拖拽起点错）。用真实
-   * 坐标判定，写盘快慢都不影响观感。
+   * 为什么不能放 effect：`useEffect` 在浏览器**绘制之后**执行。effect 里
+   * `setPendingMove(null)` 会触发第二次渲染，于是这一帧先用旧值画一次、
+   * 下一帧再画新值 —— 正好是用户看到的「松手后闪一下/跳一下」。
+   * 在渲染期算出「是否已追上」，同一帧就用正确值渲染，中间没有可观测的中间态。
    *
-   * `targets` 是松手时算出的绝对坐标；某个 id 不在 `targets` 里就不参与判定。
-   * 兜底：3 秒内仍未追上（保存失败）也释放 —— 失败时外层会显示错误，
-   * 卡片回到服务端真实位置才是对的，不能永远停在预览位置。
+   * 副作用是渲染期读模型，这是允许的：纯读、幂等、不触发额外渲染。
    */
-  useEffect(() => {
-    if (pendingMove === null) return;
-    const settled = pendingMove.targets.every(({ cardId, x, y }) => {
+  const pendingMoveActive = useMemo(() => {
+    if (pendingMove === null) return null;
+    const settledNow = pendingMove.targets.every(({ cardId, x, y }) => {
       const position = getResolvedPosition(model, cardId);
       if (position === null) return true;
       return Math.abs(position.x - x) < 0.5 && Math.abs(position.y - y) < 0.5;
     });
-    if (settled) {
-      setPendingMove(null);
-      return;
-    }
+    return settledNow ? null : pendingMove;
+  }, [pendingMove, model]);
+
+  /** 兜底：3 秒未追上（保存失败）也要释放，避免预览永远卡住。 */
+  useEffect(() => {
+    if (pendingMove === null) return;
     const timer = setTimeout(() => setPendingMove(null), 3000);
     return () => clearTimeout(timer);
-  }, [pendingMove, model]);
+  }, [pendingMove]);
 
   /** 提交视口变化。只在交互结束时落一次盘，避免拖拽过程中刷爆服务端。 */
   const commitViewport = useCallback(
@@ -337,15 +338,16 @@ export function CanvasSurface({
           return;
         }
         /**
-         * **不要在这里清掉预览。**
+         * 松手：把位移交给 `pendingMove` 接管，**同时清掉 `dragPreview`**。
          *
-         * 松手时模型里还是旧坐标：提交要经过 PATCH → 服务端落盘 → reload 才回来。
-         * 若此时 `setDragPreview(null)`，卡片会立刻弹回旧位置，等 reload 到达再跳到
-         * 新位置——用户看到的就是「松手后闪一下再跳」。这是肉眼可见的卡帧。
+         * 这两步必须成对。踩过的坑：只设 `pendingMove` 不清 `dragPreview`，
+         * 渲染时 `pinned` 优先所以看着正常；但 `pendingMove` 一被释放
+         * （模型追上或 3s 超时），残留的 `dragPreview` 就重新生效，
+         * 在**已经含位移的新位置**上再叠一次 dx/dy —— 卡片松手后瞬间跳远。
          *
-         * 正确做法：把当前位移记成「待确认位移」，继续画在新位置上，等模型真的
-         * 追上来（见下方 effect）再释放。中间不产生任何回跳。
+         * 同一批次里更新，React 会合并成一次渲染，中间不产生回弹帧。
          */
+        setDragPreview(null);
         setPendingMove({ dx, dy, targets: moves });
         onMoveCards(moves);
         return;
@@ -435,7 +437,7 @@ export function CanvasSurface({
              * 「模型未追上」和「已追上」两种状态下都指向同一个位置，天然无跳变。
              */
             const draggingThis = dragPreview !== null && selectedSet.has(card.id) ? dragPreview : null;
-            const pinned = pendingMove?.targets.find(target => target.cardId === card.id) ?? null;
+            const pinned = pendingMoveActive?.targets.find(target => target.cardId === card.id) ?? null;
             const moving = draggingThis !== null || pinned !== null;
             const left = pinned !== null ? pinned.x : position.x + (draggingThis?.dx ?? 0);
             const top = pinned !== null ? pinned.y : position.y + (draggingThis?.dy ?? 0);
