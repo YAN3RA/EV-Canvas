@@ -76,3 +76,188 @@ body,
 .evc-muted {
   color: var(--evc-muted);
 }
+
+.evc-spacer {
+  flex: 1;
+}
+
+.evc-header button {
+  padding: 3px 10px;
+  border: 1px solid var(--evc-border);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.evc-header button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.evc-status {
+  font-size: 11px;
+  color: var(--evc-muted);
+}
+
+.evc-workbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--evc-border);
+  overflow-x: auto;
+}
+
+.evc-workbar button {
+  padding: 3px 10px;
+  border: 1px solid var(--evc-border);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.evc-workbar button.is-active {
+  border-color: var(--evc-accent);
+  color: var(--evc-accent);
+}
+
+.evc-error {
+  margin: 8px 12px;
+  padding: 8px 10px;
+  border: 1px solid #d9534f;
+  border-radius: 5px;
+  color: #d9534f;
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.evc-empty {
+  padding: 24px 16px;
+  color: var(--evc-muted);
+}
+
+.evc-canvas {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.evc-canvas-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--evc-border);
+  font-size: 12px;
+}
+
+.evc-canvas-toolbar button {
+  padding: 2px 8px;
+  border: 1px solid var(--evc-border);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.evc-canvas-toolbar input[type='range'] {
+  width: 140px;
+}
+
+.evc-zoom-label {
+  min-width: 44px;
+  color: var(--evc-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.evc-canvas-surface {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  cursor: grab;
+  /* 细网格，让平移有参照；颜色跟随主题 */
+  background-image:
+    linear-gradient(to right, var(--evc-border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--evc-border) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: 0 0;
+  touch-action: none;
+}
+
+.evc-canvas-surface.is-dragging {
+  cursor: grabbing;
+}
+
+.evc-canvas-world {
+  position: absolute;
+  inset: 0;
+  /* transform 由 JS 控制；这里只保证子元素按 world 坐标定位 */
+}
+
+.evc-card {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid var(--evc-border);
+  border-radius: 8px;
+  background: var(--evc-bg);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+  cursor: pointer;
+  user-select: none;
+}
+
+.evc-card.is-selected {
+  border-color: var(--evc-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--evc-accent) 35%, transparent);
+}
+
+.evc-card.is-collapsed {
+  gap: 0;
+}
+
+.evc-card-title {
+  font-weight: 600;
+  line-height: 1.35;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.evc-card-question {
+  margin: 0;
+  color: var(--evc-muted);
+  font-size: 12px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+}
+
+.evc-card-flag {
+  align-self: flex-start;
+  padding: 0 5px;
+  border: 1px solid var(--evc-border);
+  border-radius: 4px;
+  color: var(--evc-muted);
+  font-size: 10px;
+}
+
+.evc-canvas-warnings {
+  padding: 4px 12px;
+  border-top: 1px solid var(--evc-border);
+  color: var(--evc-muted);
+  font-size: 11px;
+}
