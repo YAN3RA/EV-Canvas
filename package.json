@@ -23,6 +23,11 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs && vite build",
