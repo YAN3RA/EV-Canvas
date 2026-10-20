@@ -65,8 +65,14 @@ const ASSET_EXTENSIONS = new Set(['.css', '.js', '.woff2', '.woff', '.ttf', '.sv
 /** 资产文件名只允许 `[A-Za-z0-9._-]`，杜绝任何路径语义。 */
 const ASSET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CONTENT_TYPES = Object.freeze({
+    // `.html` 必须在表里：缺了它 `index.html` 会落到 `application/octet-stream`，
+    // 浏览器于是把入口页当成**文件下载**，弹出「保存 / 下载」对话框而不是渲染。
+    // 这条曾经真实发生过：路由 200、产物一致、路径前缀也对，但用户点进去只看到
+    // 一个下载框 —— 症状离「内容类型写错」有十万八千里，靠状态码永远查不出来。
+    '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
     '.woff2': 'font/woff2',
     '.woff': 'font/woff',
     '.ttf': 'font/ttf',

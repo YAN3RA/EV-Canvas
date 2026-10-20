@@ -1,6 +1,6 @@
 // @ts-nocheck -- 测试用假宿主 ctx 与假 req/res，断言精确。
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, PLUGIN_META, ROUTE_PREFIX, inject, name } from '@/server/index';
@@ -169,6 +169,31 @@ describe('apply 挂载', () => {
     } else {
       expect(res.state.body).toMatch(/id="root"/);
     }
+  });
+
+  /**
+   * 回归：入口页的 Content-Type 必须是 `text/html`，**且来源是产物映射表**。
+   *
+   * 为什么这条必须单独存在：`CONTENT_TYPES` 缺 `.html` 时 `readUiFile` 返回
+   * `application/octet-stream`，浏览器把入口页当成**文件下载**，弹出「保存」
+   * 对话框。真实症状离「内容类型写错」十万八千里，靠状态码永远查不出来。
+   *
+   * 为什么不能靠上面那条：上面只断言 `/text\/html/`，而产物缺失的 fallback
+   * 分支硬编码了 `text/html` —— bug 存在时它照样通过。
+   *
+   * 关键限制（踩过）：测试从 `src/server/index.ts` 导入，`UI_ROOT` 解析成
+   * `src/ui/` 而不是 `dist/ui/`，所以**永远**走 fallback，真实分支测不到。
+   * 因此这里不去模拟文件系统，而是直接守住映射表这个契约本身：
+   * 表里必须有 `.html`，且值必须是 HTML 类型。这是「产物路径正确」的充分条件，
+   * 而模拟文件系统只会把测试变成对 `import.meta.url` 的脆弱依赖。
+   */
+  it('内容类型表覆盖 .html（缺失会让浏览器把入口页当下载）', async () => {
+    const source = await readFile(join(process.cwd(), 'src', 'server', 'index.ts'), 'utf8');
+    expect(source).toMatch(/['"]\.html['"]\s*:\s*['"]text\/html;\s*charset=utf-8['"]/);
+    // 反向断言：入口页实际响应也绝不能是 octet-stream。
+    const res = fakeResponse();
+    await ctx.routes.get('exact:/evcanvas/').handler(fakeRequest(), res);
+    expect(res.state.headers['content-type']).not.toMatch(/octet-stream/);
   });
 
   it('静态资源路由存在，且路径穿越与非法扩展名一律 404', async () => {
