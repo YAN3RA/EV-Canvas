@@ -97,41 +97,61 @@ export function App(): React.JSX.Element {
     };
   }, []);
 
+  /**
+   * 提交串行化：同一时刻只允许一次写入在途。
+   *
+   * 为什么必须串行：每次写入都用 `modelRef.current.revision` 做乐观锁。若上一次
+   * 还没返回就发下一次，两次会带**同一个 revision**，第二次必然 409。
+   * 单选拖拽之间通常有间隔，撞上的概率低；框选后连续拖拽会把这个窗口放大，
+   * 于是表现为「多选拖拽松手后位置先乱跳、再回弹」——错误被 catch 成提示，
+   * 但卡片已经停在 pending 位置，直到 3 秒兜底才归位。
+   *
+   * 队列语义：后到的写入排在队尾，等前一次 `reload` 完成（拿到新 revision）
+   * 再执行。这样每次提交都基于最新版本，409 从根上消失。
+   */
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve());
+
   const submitPatches = useCallback(
     async (patches: Patch[]) => {
       if (patches.length === 0) return;
-      const workspaceId = canvas.activeWorkspaceId;
-      const model = modelRef.current;
-      const revision = model?.revision;
-      const projectionEpoch = model?.projectionEpoch;
-      if (workspaceId === null || typeof revision !== 'number') {
-        // 没有工作区或没有版本号时**不假装保存成功**，明确告知用户。
-        setSaveError('当前没有可写入的工作区（或缺少 revision），改动未保存');
-        return;
-      }
-      if (typeof projectionEpoch !== 'number' || projectionEpoch < 1) {
-        // 纪元缺失时同样不猜：服务端会以 400 拒绝，与其让用户看到晦涩的报错，
-        // 不如在这里说清「数据还没加载完」。
-        setSaveError('缺少 projectionEpoch，数据可能尚未加载完成，改动未保存');
-        return;
-      }
-      setSaving(true);
-      setSaveError(null);
-      try {
-        const snapshot = snapshotFromPatches(patches);
-        await patchLayout(workspaceId, revision, {
-          projectionEpoch,
-          layout: { cards: snapshot.cards, collapsed: snapshot.collapsed, viewport: snapshot.viewport },
-          regions: snapshot.regions,
-          annotations: snapshot.annotations,
-        });
-        setHistoryVersion(version => version + 1);
-        await canvas.reload();
-      } catch (error) {
-        setSaveError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setSaving(false);
-      }
+      const run = async (): Promise<void> => {
+        const workspaceId = canvas.activeWorkspaceId;
+        const model = modelRef.current;
+        const revision = model?.revision;
+        const projectionEpoch = model?.projectionEpoch;
+        if (workspaceId === null || typeof revision !== 'number') {
+          // 没有工作区或没有版本号时**不假装保存成功**，明确告知用户。
+          setSaveError('当前没有可写入的工作区（或缺少 revision），改动未保存');
+          return;
+        }
+        if (typeof projectionEpoch !== 'number' || projectionEpoch < 1) {
+          // 纪元缺失时同样不猜：服务端会以 400 拒绝，与其让用户看到晦涩的报错，
+          // 不如在这里说清「数据还没加载完」。
+          setSaveError('缺少 projectionEpoch，数据可能尚未加载完成，改动未保存');
+          return;
+        }
+        setSaving(true);
+        setSaveError(null);
+        try {
+          const snapshot = snapshotFromPatches(patches);
+          await patchLayout(workspaceId, revision, {
+            projectionEpoch,
+            layout: { cards: snapshot.cards, collapsed: snapshot.collapsed, viewport: snapshot.viewport },
+            regions: snapshot.regions,
+            annotations: snapshot.annotations,
+          });
+          setHistoryVersion(version => version + 1);
+          // 必须等 reload 落地：下一次排队的写入靠它拿到新 revision。
+          await canvas.reload();
+        } catch (error) {
+          setSaveError(error instanceof Error ? error.message : String(error));
+        } finally {
+          setSaving(false);
+        }
+      };
+      // 接在队尾；前一次失败不能卡死队列，所以 catch 之后继续。
+      writeChainRef.current = writeChainRef.current.then(run, run);
+      await writeChainRef.current;
     },
     [canvas, snapshotFromPatches],
   );

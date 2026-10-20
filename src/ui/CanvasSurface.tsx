@@ -158,6 +158,40 @@ export function CanvasSurface({
     return () => clearTimeout(timer);
   }, [pendingMove]);
 
+  /**
+   * 诊断埋点（临时保留，定位「多选拖拽跳帧」用）。
+   *
+   * 为什么需要它：单选正常、多选异常，两者代码路径只差 targets 的项数。
+   * 仅靠阅读代码已经错了两轮，必须拿真实时间线才能继续。
+   * 打开 DevTools console 即可看到每次拖拽的完整轨迹；定位后删除。
+   *
+   * 输出前缀固定为 `[evc-drag]`，便于过滤，且**只在控制台**，不进任何 UI。
+   */
+  const traceRef = useRef<{ t: number; phase: string; detail: unknown }[]>([]);
+  useEffect(() => {
+    if (pendingMove === null) return;
+    const now = performance.now();
+    const snapshot = pendingMove.targets.map(target => {
+      const position = getResolvedPosition(model, target.cardId);
+      return {
+        id: target.cardId,
+        target: { x: target.x, y: target.y },
+        model: position === null ? null : { x: position.x, y: position.y },
+        reached: position !== null && Math.abs(position.x - target.x) < 0.5 && Math.abs(position.y - target.y) < 0.5,
+      };
+    });
+    const entry = { t: Math.round(now), phase: 'pending-check', detail: snapshot };
+    traceRef.current.push(entry);
+    // 只在仍有未追上的项时打印，避免刷屏；全部追上的那次也打一条收尾。
+    console.info('[evc-drag]', entry);
+    const timer = setTimeout(() => {
+      if (traceRef.current.length === 0) return;
+      console.info('[evc-drag] trace', traceRef.current);
+      traceRef.current = [];
+    }, 3200);
+    return () => clearTimeout(timer);
+  }, [pendingMove, model]);
+
   /** 提交视口变化。只在交互结束时落一次盘，避免拖拽过程中刷爆服务端。 */
   const commitViewport = useCallback(
     (next: Transform) => {
