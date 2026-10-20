@@ -3,6 +3,7 @@ import { PLUGIN_META } from '../shared/meta.js';
 import { useCanvasData, patchLayout, readLayoutBundle, type WorkspaceSummary } from './data.js';
 import { CanvasSurface } from './CanvasSurface.js';
 import { createCommandHistory, type Patch } from '../canvas/commands.js';
+import { getResolvedPosition } from '../canvas/model.js';
 
 /**
  * EV Canvas 前端主视图。
@@ -186,6 +187,56 @@ export function App(): React.JSX.Element {
 
   // historyVersion 只用于触发重渲染，让「撤销」按钮的可用态跟着历史变化。
   const canUndo = useMemo(() => history.commands !== undefined && historyVersion >= 0, [history, historyVersion]);
+
+  /**
+   * 方向键微调选中卡片。
+   *
+   * 取舍说明：
+   *   - 步长 1（world 像素）与 `moveCard` 的取整口径一致；Shift 走 10 倍，
+   *     这是画布类工具的通行约定，不需要额外 UI。
+   *   - 只移动**选中**卡片：没有选中时按键不做事，避免误触把整张画布推开。
+   *   - 一次按键 = 一步撤销（每条命令各自 commit），但按住连发会产生很多步 ——
+   *     这是可接受的：撤销栈上限 100，且方向键微调本身就是细粒度操作。
+   *   - 输入框/可编辑区获焦时**不拦截**按键（FR-09.5 边界：不抢按键）。
+   */
+  const nudgeSelection = useCallback(
+    (dx: number, dy: number) => {
+      if (selectedCardIds.length === 0) return;
+      const patches: Patch[] = [];
+      for (const cardId of selectedCardIds) {
+        const position = modelRef.current === null ? null : getResolvedPosition(modelRef.current, cardId);
+        if (position === null) continue;
+        const recorded = history.commit(history.commands.moveCard(cardId, { x: position.x + dx, y: position.y + dy }));
+        if (recorded !== null) patches.push(...(recorded.patches as Patch[]));
+      }
+      if (patches.length > 0) void submitPatches(patches);
+    },
+    [history, selectedCardIds, submitPatches],
+  );
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null;
+      // 正文编辑、输入框、下拉等获焦时让位给宿主/系统。
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable === true) return;
+      if (selectedCardIds.length === 0) return;
+
+      const step = event.shiftKey ? 10 : 1;
+      const deltas: Record<string, [number, number]> = {
+        ArrowLeft: [-step, 0],
+        ArrowRight: [step, 0],
+        ArrowUp: [0, -step],
+        ArrowDown: [0, step],
+      };
+      const delta = deltas[event.key];
+      if (delta === undefined) return;
+      event.preventDefault();
+      nudgeSelection(delta[0], delta[1]);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [nudgeSelection, selectedCardIds.length]);
 
   const statusLabel = saving ? '保存中…' : canvas.status === 'loading' ? '加载中…' : null;
 

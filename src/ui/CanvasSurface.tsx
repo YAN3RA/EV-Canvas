@@ -112,6 +112,14 @@ export function CanvasSurface({
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   /** 拖拽中的卡片预览位移（world），避免每帧写回模型。 */
   const [dragPreview, setDragPreview] = useState<{ dx: number; dy: number } | null>(null);
+  /**
+   * 松手后、模型尚未追上新位置期间继续使用的位移。
+   *
+   * 存在的唯一理由是消除「松手→回跳→再跳到新位置」的闪跳：从 `onMoveCards`
+   * 发出到 `reload` 落地之间有一次网络往返，这段时间必须继续把卡片画在新位置。
+   * 一旦模型里这些卡片的位置真的等于目标值，就释放（见下面的 effect）。
+   */
+  const [pendingMove, setPendingMove] = useState<{ dx: number; dy: number; targets: { cardId: string; x: number; y: number }[] } | null>(null);
   const [dragging, setDragging] = useState(false);
 
   const selectable = useMemo(() => toSelectable(model), [model]);
@@ -122,6 +130,32 @@ export function CanvasSurface({
     if (dragging) return;
     setTransform({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
   }, [viewport.x, viewport.y, viewport.zoom, dragging]);
+
+  /**
+   * 模型追上目标位移后释放 `pendingMove`。
+   *
+   * 判据用「所有被拖卡片是否已经落在目标坐标上」而不是定时器：定时器要么太短
+   * （网络慢时照样闪），要么太长（松手后位置发虚、下次拖拽起点错）。用真实
+   * 坐标判定，写盘快慢都不影响观感。
+   *
+   * `targets` 是松手时算出的绝对坐标；某个 id 不在 `targets` 里就不参与判定。
+   * 兜底：3 秒内仍未追上（保存失败）也释放 —— 失败时外层会显示错误，
+   * 卡片回到服务端真实位置才是对的，不能永远停在预览位置。
+   */
+  useEffect(() => {
+    if (pendingMove === null) return;
+    const settled = pendingMove.targets.every(({ cardId, x, y }) => {
+      const position = getResolvedPosition(model, cardId);
+      if (position === null) return true;
+      return Math.abs(position.x - x) < 0.5 && Math.abs(position.y - y) < 0.5;
+    });
+    if (settled) {
+      setPendingMove(null);
+      return;
+    }
+    const timer = setTimeout(() => setPendingMove(null), 3000);
+    return () => clearTimeout(timer);
+  }, [pendingMove, model]);
 
   /** 提交视口变化。只在交互结束时落一次盘，避免拖拽过程中刷爆服务端。 */
   const commitViewport = useCallback(
@@ -285,15 +319,35 @@ export function CanvasSurface({
       }
 
       if (gesture.kind === 'cards') {
-        setDragPreview(null);
-        if (!gesture.moved) return;
+        if (!gesture.moved) {
+          setDragPreview(null);
+          return;
+        }
         const dx = Math.round((event.clientX - gesture.startX) / transform.zoom);
         const dy = Math.round((event.clientY - gesture.startY) / transform.zoom);
-        if (dx === 0 && dy === 0) return;
+        if (dx === 0 && dy === 0) {
+          setDragPreview(null);
+          return;
+        }
         const moves = gesture.ids
           .filter(id => gesture.origin[id] !== undefined)
           .map(id => ({ cardId: id, x: gesture.origin[id]!.x + dx, y: gesture.origin[id]!.y + dy }));
-        if (moves.length > 0) onMoveCards(moves);
+        if (moves.length === 0) {
+          setDragPreview(null);
+          return;
+        }
+        /**
+         * **不要在这里清掉预览。**
+         *
+         * 松手时模型里还是旧坐标：提交要经过 PATCH → 服务端落盘 → reload 才回来。
+         * 若此时 `setDragPreview(null)`，卡片会立刻弹回旧位置，等 reload 到达再跳到
+         * 新位置——用户看到的就是「松手后闪一下再跳」。这是肉眼可见的卡帧。
+         *
+         * 正确做法：把当前位移记成「待确认位移」，继续画在新位置上，等模型真的
+         * 追上来（见下方 effect）再释放。中间不产生任何回跳。
+         */
+        setPendingMove({ dx, dy, targets: moves });
+        onMoveCards(moves);
         return;
       }
 
@@ -372,14 +426,26 @@ export function CanvasSurface({
           {placedCards.map(({ card, position }) => {
             if (position === null) return null;
             const selected = selectedSet.has(card.id);
-            const preview = dragPreview !== null && selectedSet.has(card.id) ? dragPreview : null;
+            /**
+             * 拖拽中：相对位移叠在当前位置上。
+             *
+             * 松手后（pendingMove）：**直接用绝对目标坐标**，不叠相对位移。
+             * 这一点踩过：叠相对位移时，模型一旦追上（position 已变成目标），
+             * 再叠一次 dx/dy 就会多移一倍 —— 卡片会二次跳动。绝对坐标在
+             * 「模型未追上」和「已追上」两种状态下都指向同一个位置，天然无跳变。
+             */
+            const draggingThis = dragPreview !== null && selectedSet.has(card.id) ? dragPreview : null;
+            const pinned = pendingMove?.targets.find(target => target.cardId === card.id) ?? null;
+            const moving = draggingThis !== null || pinned !== null;
+            const left = pinned !== null ? pinned.x : position.x + (draggingThis?.dx ?? 0);
+            const top = pinned !== null ? pinned.y : position.y + (draggingThis?.dy ?? 0);
             return (
               <article
                 key={card.id}
-                className={`evc-card${selected ? ' is-selected' : ''}${card.collapsed ? ' is-collapsed' : ''}${preview !== null ? ' is-moving' : ''}`}
+                className={`evc-card${selected ? ' is-selected' : ''}${card.collapsed ? ' is-collapsed' : ''}${moving ? ' is-moving' : ''}`}
                 style={{
-                  left: position.x + (preview?.dx ?? 0),
-                  top: position.y + (preview?.dy ?? 0),
+                  left,
+                  top,
                   width: CARD_WIDTH,
                   height: card.collapsed ? 'auto' : CARD_HEIGHT,
                 }}
