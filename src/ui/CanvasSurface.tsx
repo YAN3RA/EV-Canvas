@@ -1,19 +1,30 @@
 /**
- * EV Canvas · 画布表面（world 坐标容器 + 卡片渲染）
+ * EV Canvas · 画布表面（world 坐标容器 + 卡片渲染 + 拖拽/框选交互）
  *
- * 职责边界：**只负责把模型摆到屏幕上**。
- * 位置计算、邻接、碰撞全部来自 `src/canvas/*`；缩放钳制来自 `shared/constants`
- * （S1-9：`0.05–5`，与旧版 `0.6–4` 不同，故意偏离并已记录）。
+ * 职责边界：**只负责把模型摆到屏幕上，并把指针事件翻译成交互意图**。
+ * 位置计算、邻接、碰撞、选中集运算全部来自 `src/canvas/*`；缩放钳制来自
+ * `shared/constants`（S1-9：`0.05–5`，与旧版 `0.6–4` 不同，故意偏离并已记录）。
  *
  * 为什么用 CSS transform 而不是逐卡算屏幕坐标：
  * 平移/缩放时只有一层 transform 变化，浏览器可合成，不必重排每张卡；
  * 卡片自身的 world 坐标保持整数，便于调试与对齐网格。
+ *
+ * 交互优先级（从高到低）：拖卡片 > 框选 > 平移。
+ * 三者都用 pointer capture 实现，同一时刻只会有一个手势在跑。
+ *
+ * **未实现**：复制粘贴（需要八类节点层，当前 `CanvasModel` 只有会话卡片）。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getResolvedPosition, type CanvasModel } from '../canvas/model.js';
 import { CARD_HEIGHT, CARD_WIDTH } from '../canvas/layout.js';
 import { MAX_ZOOM, MIN_ZOOM } from '../shared/constants.js';
+import {
+  nodesInRect,
+  selectionBounds,
+  type Rect,
+  type SelectableNode,
+} from '../canvas/selection.js';
 import type { Patch } from '../canvas/commands.js';
 
 /** 滚轮缩放因子：`1.1^(Δ/100)`，取自 S1-9 实测参数。 */
@@ -21,14 +32,18 @@ const WHEEL_FACTOR_BASE = 1.1;
 /** 滑杆范围（百分比），S1-9。 */
 const SLIDER_MIN = 5;
 const SLIDER_MAX = 500;
+/** 判定「这是拖拽不是点击」的像素阈值；低于它按点击处理。 */
+const DRAG_THRESHOLD_PX = 3;
 
 export interface CanvasSurfaceProps {
   model: CanvasModel | null;
   /** 视口变化提交入口；由外层决定是否落盘。 */
   onViewportCommit: (viewport: { x: number; y: number; zoom: number }) => void;
-  /** 当前选中卡片，用于高亮。 */
-  selectedCardId?: string | null;
-  onSelectCard?: (cardId: string) => void;
+  /** 选中集变化；由外层持有，便于键盘与批量操作复用。 */
+  selectedCardIds: readonly string[];
+  onSelectionChange: (ids: string[]) => void;
+  /** 卡片拖拽落位；一次拖拽只提交一次，`dx/dy` 取整后的世界坐标位移。 */
+  onMoveCards: (moves: { cardId: string; x: number; y: number }[]) => void;
 }
 
 interface Transform {
@@ -39,15 +54,68 @@ interface Transform {
 
 /** 与 `commands.ts` 的 clampZoom 保持同一区间，此处不重复引依赖。 */
 function clampZoom(value: number): number {
-  if (!Number.isFinite(value)) return 1;
+  if (!Number.isFinite(value)) return NaN;
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 }
 
-export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelectCard }: CanvasSurfaceProps): React.JSX.Element {
+/** 一次进行中的手势。三种手势互斥，所以用一个判别联合而不是三个 ref。 */
+type Gesture =
+  | { kind: 'pan'; pointerId: number; startX: number; startY: number; originX: number; originY: number }
+  | { kind: 'marquee'; pointerId: number; startX: number; startY: number; currentX: number; currentY: number }
+  | {
+      kind: 'cards';
+      pointerId: number;
+      startX: number;
+      startY: number;
+      /** 起始时的选中集，拖拽过程中不变 */
+      ids: string[];
+      /** 每个被拖卡片的原始位置（world） */
+      origin: Record<string, { x: number; y: number }>;
+      moved: boolean;
+    };
+
+/**
+ * 把卡片适配成选中层认识的最小形状。
+ *
+ * 为什么需要这层适配：`selection.ts` 用 `nodeId` 表达稳定标识（为八类节点设计），
+ * 而 `CanvasModel` 的卡片用 `id`。在这里翻译一次，好过把 `selection.ts` 改成
+ * 同时认两种字段——那会让纯模块出现第二套命名，后续节点层接入时反而更乱。
+ */
+function toSelectable(model: CanvasModel | null): SelectableNode[] {
+  if (model === null) return [];
+  const out: SelectableNode[] = [];
+  for (const card of model.cards) {
+    const position = getResolvedPosition(model, card.id);
+    if (position === null) continue;
+    out.push({
+      nodeId: card.id,
+      x: position.x,
+      y: position.y,
+      width: CARD_WIDTH,
+      height: CARD_HEIGHT,
+    });
+  }
+  return out;
+}
+
+export function CanvasSurface({
+  model,
+  onViewportCommit,
+  selectedCardIds,
+  onSelectionChange,
+  onMoveCards,
+}: CanvasSurfaceProps): React.JSX.Element {
   const viewport = model?.viewport ?? { x: 0, y: 0, zoom: 1 };
   const [transform, setTransform] = useState<Transform>({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
-  const dragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const gestureRef = useRef<Gesture | null>(null);
+  /** 框选矩形的屏幕坐标，仅用于绘制视觉反馈。 */
+  const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  /** 拖拽中的卡片预览位移（world），避免每帧写回模型。 */
+  const [dragPreview, setDragPreview] = useState<{ dx: number; dy: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+
+  const selectable = useMemo(() => toSelectable(model), [model]);
+  const selectedSet = useMemo(() => new Set(selectedCardIds), [selectedCardIds]);
 
   // 模型换了（切换工作区/重新加载）就跟随，除非用户正在拖拽。
   useEffect(() => {
@@ -63,25 +131,92 @@ export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelec
     [onViewportCommit],
   );
 
-  const onWheel = useCallback(
-    (event: React.WheelEvent<HTMLDivElement>) => {
-      // 只按滚轮缩放；按住 ctrl 时也让浏览器默认缩放走开，避免双缩放。
-      event.preventDefault();
-      const delta = -event.deltaY;
-      setTransform(previous => {
-        const zoom = clampZoom(previous.zoom * WHEEL_FACTOR_BASE ** (delta / 100));
-        return { ...previous, zoom };
-      });
+  const onWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    // 只按滚轮缩放；不让浏览器默认缩放叠加。
+    event.preventDefault();
+    const delta = -event.deltaY;
+    setTransform(previous => {
+      const zoom = clampZoom(previous.zoom * WHEEL_FACTOR_BASE ** (delta / 100));
+      // clampZoom 对非法输入返回 NaN —— 那是 bug，不是「用 1 兜底」的场景，
+      // 静默兜底会把一次计算错误藏起来，所以保持原值不变。
+      return Number.isFinite(zoom) ? { ...previous, zoom } : previous;
+    });
+  }, []);
+
+  /** 屏幕坐标 → world 坐标。框选与拖拽都要用。 */
+  const toWorld = useCallback(
+    (clientX: number, clientY: number, host: HTMLElement): { x: number; y: number } => {
+      const box = host.getBoundingClientRect();
+      return {
+        x: (clientX - box.left - transform.x) / transform.zoom,
+        y: (clientY - box.top - transform.y) / transform.zoom,
+      };
     },
-    [],
+    [transform.x, transform.y, transform.zoom],
   );
 
   const onPointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      // 只在空白处开始平移；点在卡片上交给卡片自己处理。
-      if (event.target !== event.currentTarget && (event.target as HTMLElement).closest('.evc-card')) return;
-      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-      dragRef.current = {
+      if (event.button !== 0) return;
+      const host = event.currentTarget;
+      const cardElement = (event.target as HTMLElement).closest('[data-card-id]');
+      const cardId = cardElement?.getAttribute('data-card-id') ?? null;
+
+      if (cardId !== null) {
+        // ── 拖卡片 ────────────────────────────────────────────────
+        event.stopPropagation();
+        // Shift/Ctrl 点击是加选/减选，不进入拖拽。
+        if (event.shiftKey || event.ctrlKey || event.metaKey) {
+          const next = selectedSet.has(cardId)
+            ? selectedCardIds.filter(id => id !== cardId)
+            : [...selectedCardIds, cardId];
+          onSelectionChange(next);
+          return;
+        }
+        // 点未选中的卡片：先把它变成唯一选中项，再开始拖。
+        const ids = selectedSet.has(cardId) ? [...selectedCardIds] : [cardId];
+        if (!selectedSet.has(cardId)) onSelectionChange(ids);
+        const origin: Record<string, { x: number; y: number }> = {};
+        for (const id of ids) {
+          const position = getResolvedPosition(model, id);
+          if (position !== null) origin[id] = { x: position.x, y: position.y };
+        }
+        if (Object.keys(origin).length === 0) return;
+        host.setPointerCapture(event.pointerId);
+        gestureRef.current = {
+          kind: 'cards',
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          ids,
+          origin,
+          moved: false,
+        };
+        return;
+      }
+
+      // 空白处：Shift 或按住 Alt 才是框选，否则是平移。
+      // 为什么不默认框选：画布最常见的动作是挪视图，框选是低频操作。
+      if (event.shiftKey || event.altKey) {
+        const start = toWorld(event.clientX, event.clientY, host);
+        host.setPointerCapture(event.pointerId);
+        gestureRef.current = {
+          kind: 'marquee',
+          pointerId: event.pointerId,
+          startX: start.x,
+          startY: start.y,
+          currentX: start.x,
+          currentY: start.y,
+        };
+        setMarquee({ x: 0, y: 0, w: 0, h: 0 });
+        onSelectionChange([]);
+        return;
+      }
+
+      host.setPointerCapture(event.pointerId);
+      gestureRef.current = {
+        kind: 'pan',
+        pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
         originX: transform.x,
@@ -89,32 +224,91 @@ export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelec
       };
       setDragging(true);
     },
-    [transform.x, transform.y],
+    [model, onSelectionChange, selectedCardIds, selectedSet, toWorld, transform.x, transform.y],
   );
 
-  const onPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (drag === null) return;
-    setTransform(previous => ({
-      ...previous,
-      x: drag.originX + (event.clientX - drag.startX),
-      y: drag.originY + (event.clientY - drag.startY),
-    }));
-  }, []);
-
-  const endDrag = useCallback(
+  const onPointerMove = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      if (dragRef.current === null) return;
-      dragRef.current = null;
-      setDragging(false);
-      (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
-      // 用最新 transform 落盘
-      setTransform(current => {
-        commitViewport(current);
-        return current;
+      const gesture = gestureRef.current;
+      if (gesture === null || gesture.pointerId !== event.pointerId) return;
+      const host = event.currentTarget;
+
+      if (gesture.kind === 'pan') {
+        setTransform(previous => ({
+          ...previous,
+          x: gesture.originX + (event.clientX - gesture.startX),
+          y: gesture.originY + (event.clientY - gesture.startY),
+        }));
+        return;
+      }
+
+      if (gesture.kind === 'cards') {
+        const dxScreen = event.clientX - gesture.startX;
+        const dyScreen = event.clientY - gesture.startY;
+        // 阈值：小于它视为点击，不产生位移补丁（避免「点一下就挪了 1px」）。
+        if (!gesture.moved && Math.abs(dxScreen) < DRAG_THRESHOLD_PX && Math.abs(dyScreen) < DRAG_THRESHOLD_PX) return;
+        gesture.moved = true;
+        const dx = Math.round(dxScreen / transform.zoom);
+        const dy = Math.round(dyScreen / transform.zoom);
+        setDragPreview({ dx, dy });
+        return;
+      }
+
+      // marquee
+      const current = toWorld(event.clientX, event.clientY, host);
+      gesture.currentX = current.x;
+      gesture.currentY = current.y;
+      setMarquee({
+        x: Math.min(gesture.startX, current.x),
+        y: Math.min(gesture.startY, current.y),
+        w: Math.abs(current.x - gesture.startX),
+        h: Math.abs(current.y - gesture.startY),
       });
     },
-    [commitViewport],
+    [toWorld, transform.zoom],
+  );
+
+  const endGesture = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const gesture = gestureRef.current;
+      if (gesture === null || gesture.pointerId !== event.pointerId) return;
+      gestureRef.current = null;
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+
+      if (gesture.kind === 'pan') {
+        setDragging(false);
+        setTransform(current => {
+          commitViewport(current);
+          return current;
+        });
+        return;
+      }
+
+      if (gesture.kind === 'cards') {
+        setDragPreview(null);
+        if (!gesture.moved) return;
+        const dx = Math.round((event.clientX - gesture.startX) / transform.zoom);
+        const dy = Math.round((event.clientY - gesture.startY) / transform.zoom);
+        if (dx === 0 && dy === 0) return;
+        const moves = gesture.ids
+          .filter(id => gesture.origin[id] !== undefined)
+          .map(id => ({ cardId: id, x: gesture.origin[id]!.x + dx, y: gesture.origin[id]!.y + dy }));
+        if (moves.length > 0) onMoveCards(moves);
+        return;
+      }
+
+      // marquee：用 world 矩形跑命中测试
+      const rect: Rect = {
+        x: Math.min(gesture.startX, gesture.currentX),
+        y: Math.min(gesture.startY, gesture.currentY),
+        w: Math.abs(gesture.currentX - gesture.startX),
+        h: Math.abs(gesture.currentY - gesture.startY),
+      };
+      setMarquee(null);
+      if (rect.w < 1 || rect.h < 1) return;
+      onSelectionChange(nodesInRect(selectable, rect));
+    },
+    [commitViewport, onMoveCards, onSelectionChange, selectable, transform.zoom],
   );
 
   const resetView = useCallback(() => {
@@ -129,6 +323,12 @@ export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelec
     return model.cards.map(card => ({ card, position: getResolvedPosition(model, card.id) }));
   }, [model]);
 
+  /** 选中集的 world 包围盒，用于画一圈「批量选中」提示。 */
+  const selectionBox = useMemo(
+    () => selectionBounds(selectable, selectedCardIds),
+    [selectable, selectedCardIds],
+  );
+
   return (
     <div className="evc-canvas">
       <div className="evc-canvas-toolbar">
@@ -142,12 +342,16 @@ export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelec
           value={Math.round(transform.zoom * 100)}
           onChange={event => {
             const zoom = clampZoom(Number(event.target.value) / 100);
-            setTransform(previous => ({ ...previous, zoom }));
+            if (Number.isFinite(zoom)) setTransform(previous => ({ ...previous, zoom }));
           }}
           onPointerUp={() => setTransform(current => (commitViewport(current), current))}
           aria-label="缩放"
         />
         <span className="evc-zoom-label">{Math.round(transform.zoom * 100)}%</span>
+        {selectedCardIds.length > 0 ? (
+          <span className="evc-selection-label">已选 {selectedCardIds.length} 张</span>
+        ) : null}
+        <span className="evc-muted evc-hint">Shift+拖拽空白＝框选</span>
       </div>
 
       <div
@@ -155,8 +359,8 @@ export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelec
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
+        onPointerUp={endGesture}
+        onPointerCancel={endGesture}
       >
         <div
           className="evc-canvas-world"
@@ -167,21 +371,17 @@ export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelec
         >
           {placedCards.map(({ card, position }) => {
             if (position === null) return null;
-            const selected = selectedCardId === card.id;
+            const selected = selectedSet.has(card.id);
+            const preview = dragPreview !== null && selectedSet.has(card.id) ? dragPreview : null;
             return (
               <article
                 key={card.id}
-                className={`evc-card${selected ? ' is-selected' : ''}${card.collapsed ? ' is-collapsed' : ''}`}
+                className={`evc-card${selected ? ' is-selected' : ''}${card.collapsed ? ' is-collapsed' : ''}${preview !== null ? ' is-moving' : ''}`}
                 style={{
-                  left: position.x,
-                  top: position.y,
+                  left: position.x + (preview?.dx ?? 0),
+                  top: position.y + (preview?.dy ?? 0),
                   width: CARD_WIDTH,
                   height: card.collapsed ? 'auto' : CARD_HEIGHT,
-                }}
-                onPointerDown={event => {
-                  // 卡片自身不参与平移，避免拖空白与拖卡片混淆
-                  event.stopPropagation();
-                  onSelectCard?.(card.id);
                 }}
                 data-card-id={card.id}
               >
@@ -193,6 +393,22 @@ export function CanvasSurface({ model, onViewportCommit, selectedCardId, onSelec
               </article>
             );
           })}
+
+          {/* 框选矩形：画在 world 层内，跟着缩放走 */}
+          {marquee !== null ? (
+            <div
+              className="evc-marquee"
+              style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }}
+            />
+          ) : null}
+
+          {/* 选中集包围盒：让「批量选中」在画布上看得见 */}
+          {selectionBox !== null && selectedCardIds.length > 1 ? (
+            <div
+              className="evc-selection-box"
+              style={{ left: selectionBox.x, top: selectionBox.y, width: selectionBox.w, height: selectionBox.h }}
+            />
+          ) : null}
         </div>
       </div>
 

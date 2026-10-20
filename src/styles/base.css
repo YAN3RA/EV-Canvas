@@ -227,6 +227,40 @@ body,
   gap: 0;
 }
 
+/* 拖拽中的卡片：只提层级与阴影，不改尺寸，避免拖动时布局抖动 */
+.evc-card.is-moving {
+  z-index: 2;
+  cursor: grabbing;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 22%);
+}
+
+/* 框选矩形：world 坐标，跟着缩放 */
+.evc-marquee {
+  position: absolute;
+  z-index: 3;
+  border: 1px dashed var(--evc-accent);
+  background: color-mix(in srgb, var(--evc-accent) 12%, transparent);
+  pointer-events: none;
+}
+
+/* 多选包围盒：让「批量选中」看得见，但不拦截指针 */
+.evc-selection-box {
+  position: absolute;
+  z-index: 1;
+  border: 1px solid color-mix(in srgb, var(--evc-accent) 55%, transparent);
+  border-radius: 10px;
+  pointer-events: none;
+}
+
+.evc-selection-label {
+  color: var(--evc-accent);
+  font-size: 11px;
+}
+
+.evc-hint {
+  font-size: 11px;
+}
+
 .evc-card-title {
   font-weight: 600;
   line-height: 1.35;

@@ -19,7 +19,7 @@ import { createCommandHistory, type Patch } from '../canvas/commands.js';
 export function App(): React.JSX.Element {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const canvas = useCanvasData();
-  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -110,6 +110,32 @@ export function App(): React.JSX.Element {
     }
   }, [canvas, history]);
 
+  /**
+   * 卡片拖拽落位：一次拖拽 → 一次提交 → 一步撤销。
+   *
+   * 为什么不用 `moveCard` 逐卡提交：拖动多选卡片时 N 张卡 = N 次写盘 + N 步撤销。
+   * 这里把整批位移合成**一条意图**（`setCardPosition` 逐卡补丁由 history 统一记录），
+   * 于是「一次拖动 = 一步 undo」成立（FR-09.7）。
+   */
+  const moveCards = useCallback(
+    (moves: { cardId: string; x: number; y: number }[]) => {
+      if (moves.length === 0) return;
+      const patches: Patch[] = [];
+      for (const move of moves) {
+        const recorded = history.commit(history.commands.moveCard(move.cardId, { x: move.x, y: move.y }));
+        // `commit` 对「位置没变」的卡片返回 null 或空 patches，跳过即可。
+        if (recorded !== null) patches.push(...(recorded.patches as Patch[]));
+      }
+      if (patches.length > 0) void submitPatches(patches);
+    },
+    [history, submitPatches],
+  );
+
+  /** 切换工作区时清空选中集：跨工作区的选中项没有意义，留着会误操作（FR-09.8 边界）。 */
+  useEffect(() => {
+    setSelectedCardIds([]);
+  }, [canvas.activeWorkspaceId]);
+
   // historyVersion 只用于触发重渲染，让「撤销」按钮的可用态跟着历史变化。
   const canUndo = useMemo(() => history.commands !== undefined && historyVersion >= 0, [history, historyVersion]);
 
@@ -151,15 +177,16 @@ export function App(): React.JSX.Element {
         <div className="evc-empty">
           <p>还没有工作区。</p>
           <p className="evc-muted">
-            画布内容来自 DSH 会话投影；当前尚未接入投影订阅（S0-5），因此新建工作区后会一直为空。
+            画布内容来自 DSH 会话投影；在 DSH 里发一轮对话后，对应卡片会出现在这里。
           </p>
         </div>
       ) : (
         <CanvasSurface
           model={canvas.model}
           onViewportCommit={commitViewport}
-          selectedCardId={selectedCardId}
-          onSelectCard={setSelectedCardId}
+          selectedCardIds={selectedCardIds}
+          onSelectionChange={setSelectedCardIds}
+          onMoveCards={moveCards}
         />
       )}
     </div>
