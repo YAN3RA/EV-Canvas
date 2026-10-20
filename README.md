@@ -2,9 +2,47 @@
 
 DSH 统一会话与多媒体创作工作台插件（vNext）。
 
-> **当前状态：脚手架，无业务功能。**
-> 46 项功能全部处于「未实现」，状态见 `Project Docs/1-需求/vnext功能.md`。
-> 不要把这个 README 里描述的结构当成「已完成」的证据。
+> **当前状态：底座已迁移，UI 功能层未实现。**
+> 旧代码迁移批次 1–4 完成、宿主入口已接线、构建产物可被加载；但 46 项功能仍全部「未实现」，
+> 状态见 `Project Docs/1-需求/vnext功能.md`。
+> 不要把这个 README 里描述的结构当成「功能已完成」的证据。
+
+---
+
+## 安装
+
+插件**不从 npm 安装**，也不支持「GitHub 直装源码」——DSH 拉取仓库时不会替我们跑构建，
+而本仓库的 `dist/` 不在版本控制里。正确方式是用预先构建好的组合包。
+
+### 方式一：本地 tgz（推荐）
+
+```powershell
+# 1) 构建并打包（在仓库根执行）
+npm run pack:plugin
+# 产出 release/dsh-evcanvas-<version>.tgz 与同名 .sha256
+
+# 2) 打包形态自检（会按 package.json 的 exports 解析入口并真起 HTTP 服务）
+node scripts/verify-package.mjs <解包后的 package 目录>
+
+# 3) 在 DSH 的「设置 → 插件」里选择本地 tgz 安装
+```
+
+### 方式二：写 profile 声明
+
+编辑 `C:\Users\imyan\.dsh\profiles\desktop\package.json`，两处都要加：
+
+```jsonc
+{
+  "dependencies": { "dsh-evcanvas": "file:C:\\path\\to\\dsh-evcanvas-0.0.1.tgz" },
+  "dsh": { "profile": { "bundles": ["dsh-evcanvas"] } }
+}
+```
+
+然后在 profile 目录执行 `pnpm install` 并重启 DSH。
+
+> **为什么不能 `github:` 直装**：其他插件（`dsh-share`、`dsh-ops` 等）都把编译产物
+> （`lib/`）提交进仓库，`main` 直接指向它，所以「源码即产物」。本项目用 TypeScript + Vite，
+> 产物必须现编译；`github:` 安装只会得到没有 `dist/` 的源码树，`main` 指向空路径，装上也加载不起来。
 
 ---
 

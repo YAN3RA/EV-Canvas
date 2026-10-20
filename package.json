@@ -1,26 +1,25 @@
 {
   "name": "dsh-evcanvas",
   "version": "0.0.1",
-  "private": true,
   "description": "EV Canvas — DSH unified session & multimedia creation workspace plugin",
   "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
+  "main": "./dist/server/index.js",
   "exports": {
     ".": {
       "types": "./dist/server/index.d.ts",
-      "import": "./dist/server/index.js"
-    },
-    "./client": {
-      "types": "./dist/ui/index.d.ts",
-      "import": "./dist/ui/index.js"
+      "import": "./dist/server/index.js",
+      "default": "./dist/server/index.js"
     },
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
+    "dist/server",
+    "dist/shared",
+    "dist/ui",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -28,6 +27,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs && vite build",
     "build:server": "tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs",
+    "pack:plugin": "npm run build && node scripts/pack-plugin.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -38,13 +39,11 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
     "vitest": "^2.1.8"
-  },
-  "dependencies": {
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
   },
   "pnpm": {
     "verifyDepsBeforeRun": false

@@ -9,6 +9,13 @@ coverage/
 .tmp-test/
 *.log
 
+# 本地验证用的解包目录
+.tmp-verify/
+
+# 打包产物：体积大且可由 `npm run pack:plugin` 重现，
+# 正式分发走 GitHub Release，不进版本控制。
+release/
+
 # editor / OS
 .DS_Store
 Thumbs.db
