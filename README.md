@@ -11,23 +11,45 @@ DSH 统一会话与多媒体创作工作台插件（vNext）。
 
 ## 安装
 
-插件**不从 npm 安装**，也不支持「GitHub 直装源码」——DSH 拉取仓库时不会替我们跑构建，
-而本仓库的 `dist/` 不在版本控制里。正确方式是用预先构建好的组合包。
+插件**不从 npm 安装**。`dist/`（编译产物）**已提交进仓库**，所以 `github:` 直装可用。
 
-### 方式一：本地 tgz（推荐）
+### 方式一：GitHub 直装（推荐）
 
-```powershell
-# 1) 构建并打包（在仓库根执行）
-npm run pack:plugin
-# 产出 release/dsh-evcanvas-<version>.tgz 与同名 .sha256
+DSH 安装插件时**不会替你跑构建**，因此编译产物必须随仓库一起发布。
+本仓库的 `dist/` 已纳入版本控制（31 个文件 / 513 KB，不含 sourcemap），
+与 `dsh-share`、`dsh-ops` 把 `lib/` 提交进仓库是同一做法。
 
-# 2) 打包形态自检（会按 package.json 的 exports 解析入口并真起 HTTP 服务）
-node scripts/verify-package.mjs <解包后的 package 目录>
-
-# 3) 在 DSH 的「设置 → 插件」里选择本地 tgz 安装
+```jsonc
+// ~/.dsh/profiles/desktop/package.json，两处都要加
+{
+  "dependencies": { "dsh-evcanvas": "github:YAN3RA/EV-Canvas" },
+  "dsh": { "profile": { "bundles": ["dsh-evcanvas"] } }
+}
 ```
 
-### 方式二：写 profile 声明
+锁定版本（生产推荐）：`"github:YAN3RA/EV-Canvas#ab16ce9"`。
+
+**注意**：只加 `dependencies` 不够，`bundles` 也必须加——否则包虽装进 `node_modules`，
+插件却不会被加载（表现为路由 404）。改完在 profile 目录跑 `pnpm install` 并重启 DSH。
+
+### 方式二：本地 tgz
+
+```powershell
+npm run pack:plugin     # 产出 release/dsh-evcanvas-<version>.tgz + .sha256
+```
+
+然后在「设置 → 插件」里选本地 tgz。
+
+### 改完源码必须同步产物
+
+`dist/` 进版本控制后，它就是**安装方直接使用的产物**。源码改了却忘记重建，
+会得到一个「仓库里的产物比源码旧」的状态，而本地测试照样全绿。
+
+```powershell
+npm run check:dist   # 重建并逐文件与 HEAD 比对，不一致直接失败
+```
+
+### 方式三：写 profile 声明（本地）
 
 编辑 `C:\Users\imyan\.dsh\profiles\desktop\package.json`，两处都要加：
 
