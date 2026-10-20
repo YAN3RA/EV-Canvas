@@ -1,4 +1,3 @@
-// @ts-nocheck -- TODO(types): 迁移自 dsh-synapnova@3fd1d00 server/projection.js，行为完整、类型标注待补。
 // 来源: dsh-synapnova@3fd1d00 server/projection.js
 
 /**
@@ -9,9 +8,30 @@
  * filesystem and no host access.
  *
  * Extracted verbatim from index.js by refactor-slice2.mjs.
+ *
+ * 类型说明：入参来自宿主事件流，形状由宿主决定且可能演进，所以对外用
+ * `unknown` 收窄；内部只在确认字段类型后取值，不做无依据的断言。
  */
 
-import { MAX_PROJECTION_LENGTH, PROJECTION_TRUNCATED_SUFFIX, eventMessages, isRuntimeContextText, messageSourceVerdict } from '@/shared/schema'
+import {
+  MAX_PROJECTION_LENGTH,
+  PROJECTION_TRUNCATED_SUFFIX,
+  eventMessages,
+  isRuntimeContextText,
+  messageSourceVerdict,
+} from '@/shared/schema'
+
+/** 投影出来的一条注记（`text` 已去首尾空白，超长则截断并附标记）。 */
+export interface ProjectionNote {
+  kind: string;
+  text: string
+}
+
+type UnknownRecord = Record<string, unknown>
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 
 /**
  * Decide one event-carried message: the text to project, or null when the
@@ -24,23 +44,27 @@ import { MAX_PROJECTION_LENGTH, PROJECTION_TRUNCATED_SUFFIX, eventMessages, isRu
  * text heuristic survives only as the fallback for legacy rows that carry no
  * attribution at all, so old projections stay readable.
  */
-export function admittedUserText(message) {
-  const verdict = messageSourceVerdict(message)
+export function admittedUserText(message: unknown): string | null {
+  const verdict = messageSourceVerdict(message as never)
   if (verdict === 'injected') return null
-  const text = contentText(message?.content)
+  const content = isRecord(message) ? message['content'] : undefined
+  const text = contentText(content)
   if (verdict === 'unknown' && isRuntimeContextText(text)) return null
   return text
 }
 
 /** Admitted user text carried by one message, across both durable carriers. */
-export function projectableEvent(event) {
-  switch (event.type) {
+export function projectableEvent(event: unknown): ProjectionNote | null {
+  if (!isRecord(event)) return null
+  const type = event['type']
+  const data = isRecord(event['data']) ? event['data'] : undefined
+  switch (type) {
     case 'user/message': {
       // `eventMessages` is the carrier-agnostic reader: a `user/message` keeps
       // one message in `data`, an `agent/inbox/spliced` stages queued ones in
       // `data.inserted[]`. Admission is judged by `source.kind` on whichever
       // shape the host used, through the one shared predicate.
-      const [message] = eventMessages(event)
+      const [message] = eventMessages(event as never) as unknown[]
       const text = admittedUserText(message)
       return text === null ? null : noteProjection('user', text)
     }
@@ -52,64 +76,90 @@ export function projectableEvent(event) {
       // never admitted and must not leave a card behind. Their attribution is
       // still judged by the same rule, above, for anyone reading the splice.
       return null
-    case 'assistant/message':
-      return noteProjection('assistant', contentText(event.data?.message?.content))
-    case 'todo/write':
-      return noteProjection('todo', Array.isArray(event.data?.todos) ? event.data.todos.map(todo => `[${todo.status}] ${todo.content}`).join('\n') : '')
+    case 'assistant/message': {
+      const message = data !== undefined && isRecord(data['message']) ? data['message'] : undefined
+      return noteProjection('assistant', contentText(message?.['content']))
+    }
+    case 'todo/write': {
+      const todos = data?.['todos']
+      return noteProjection(
+        'todo',
+        Array.isArray(todos)
+          ? todos
+              .map(todo => (isRecord(todo) ? `[${String(todo['status'])}] ${String(todo['content'])}` : ''))
+              .join('\n')
+          : '',
+      )
+    }
     case 'turn/end': {
-      const reason = event.data?.reason
-      if (reason?.kind === 'error') return noteProjection('error', errorText(reason.error) ?? '本轮执行失败')
-      if (reason?.kind === 'cancelled' || reason?.kind === 'canceled' || reason?.kind === 'aborted') return noteProjection('error', '本轮已取消')
+      const reason = data !== undefined && isRecord(data['reason']) ? data['reason'] : undefined
+      if (reason?.['kind'] === 'error') return noteProjection('error', errorText(reason['error']) ?? '本轮执行失败')
+      if (reason?.['kind'] === 'cancelled' || reason?.['kind'] === 'canceled' || reason?.['kind'] === 'aborted') {
+        return noteProjection('error', '本轮已取消')
+      }
       return null
     }
     default:
-      return /(?:error|failed|failure|cancel(?:led)?|abort)/i.test(event.type)
-        ? noteProjection('error', errorText(event.data?.error ?? event.data?.reason ?? event.data) ?? 'Harness 运行失败')
+      return typeof type === 'string' && /(?:error|failed|failure|cancel(?:led)?|abort)/i.test(type)
+        ? noteProjection('error', errorText(data?.['error'] ?? data?.['reason'] ?? data) ?? 'Harness 运行失败')
         : null
   }
 }
 
-export function errorText(value) {
+/** 把任意错误形状压成一行可读文本；无可用信息时返回 null（不编造）。 */
+export function errorText(value: unknown): string | null {
   if (typeof value === 'string') return value.trim() || null
   if (value === null || value === undefined || typeof value !== 'object') return null
-  const name = typeof value.name === 'string' && value.name.trim() !== '' ? value.name.trim() : ''
-  const code = typeof value.code === 'string' && value.code.trim() !== '' ? value.code.trim() : ''
-  const message = typeof value.message === 'string' && value.message.trim() !== '' ? value.message.trim() : ''
+  const record = value as UnknownRecord
+  const name = typeof record['name'] === 'string' && record['name'].trim() !== '' ? record['name'].trim() : ''
+  const code = typeof record['code'] === 'string' && record['code'].trim() !== '' ? record['code'].trim() : ''
+  const message = typeof record['message'] === 'string' && record['message'].trim() !== '' ? record['message'].trim() : ''
   if (message !== '') return [name, code].filter(Boolean).concat(message).join(': ')
   return [name, code].filter(Boolean).join(': ') || null
 }
 
-export function noteProjection(kind, text) {
+/** 归一化一条注记：空文本不产生注记，超长截断并附 `PROJECTION_TRUNCATED_SUFFIX`。 */
+export function noteProjection(kind: string, text: string): ProjectionNote | null {
   const normalized = text.trim()
   if (normalized === '') return null
   if (normalized.length <= MAX_PROJECTION_LENGTH) return { kind, text: normalized }
   return { kind, text: `${normalized.slice(0, MAX_PROJECTION_LENGTH)}${PROJECTION_TRUNCATED_SUFFIX}` }
 }
 
-export function contentText(content) {
+/** 拼接一条消息的内容块；工具调用贡献「名字 + 参数」两行，结果块递归展开。 */
+export function contentText(content: unknown): string {
   if (!Array.isArray(content)) return ''
-  return content.flatMap(block => {
-    if (block?.type === 'text') return [block.text]
-    if (block?.type === 'tool-call') return [block.name, block.arguments]
-    if (block?.type === 'tool-result') return contentText(block.content)
-    return []
-  }).filter(value => typeof value === 'string' && value.trim() !== '').join('\n')
+  return content
+    .flatMap(block => {
+      if (!isRecord(block)) return []
+      if (block['type'] === 'text') return [block['text']]
+      if (block['type'] === 'tool-call') return [block['name'], block['arguments']]
+      if (block['type'] === 'tool-result') return contentText(block['content'])
+      return []
+    })
+    .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+    .join('\n')
 }
 
-export function titleFromText(text) {
+/** 由首条用户文本生成会话标题（单行、42 字符上限）。 */
+export function titleFromText(text: string): string {
   const line = text.replaceAll(/\s+/g, ' ').trim()
   return (line.length > 42 ? `${line.slice(0, 42)}...` : line) || 'DSH 会话'
 }
 
-export function sessionCwd(session) {
+/** 会话的工作目录；缺失时给出显式的「未指定」而不是空串。 */
+export function sessionCwd(session: unknown): string {
   // The Session header defines `cwd` as its only working-directory carrier; the
   // old `header.meta.cwd` fallback never matched a real header field.
-  const cwd = session.header?.cwd
+  if (!isRecord(session)) return '未指定工作目录'
+  const header = isRecord(session['header']) ? session['header'] : undefined
+  const cwd = header?.['cwd']
   return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : '未指定工作目录'
 }
 
-export function workspaceTitle(cwd, fallbackTitle) {
+/** 由 cwd 派生工作区标题：取末段目录名，取不到时回落到给定标题。 */
+export function workspaceTitle(cwd: string, fallbackTitle: string): string {
   if (cwd === '未指定工作目录') return fallbackTitle
   const segment = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1)
-  return segment && segment.trim() !== '' ? segment : fallbackTitle
+  return segment !== undefined && segment.trim() !== '' ? segment : fallbackTitle
 }
