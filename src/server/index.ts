@@ -35,8 +35,14 @@ export interface PluginConfig {
 // 不能让前端顺着这里把 node:fs / workspace-store 拖进浏览器构建）。
 export { PLUGIN_META, ROUTE_PREFIX };
 
-/** Cordis 插件名（宿主用它标识注入的服务）。 */
-export const name = PLUGIN_META.id;
+/**
+ * Cordis 插件名。
+ *
+ * 必须与**包名**一致（`dsh-evcanvas`），而不是 `PLUGIN_META.id`（`evcanvas`）。
+ * Loader 行按 `name:` 解析到包，名字对不上时既加载不到、也不会给出明显报错。
+ * `PLUGIN_META.id` 是插件在自身数据/路由里用的短标识，两者不是一回事。
+ */
+export const name = PLUGIN_META.name;
 
 /** 注入的宿主服务：只要 Web Server，不额外开端口/服务。 */
 export const inject = ['webServer'] as const;
@@ -280,6 +286,13 @@ export function apply(ctx: unknown, config: PluginConfig): void {
   host.logger.warn(new Error(`evcanvas: store ready at ${join(dirname(dataFile), '.')}`));
 }
 
-/** 测试与后续 S0-5 会用到的重导出（与旧版根入口保持同一公开面）。 */
+/**
+ * 测试与后续 S0-5 会用到的重导出。
+ *
+ * **不要在这里加 `export { apply as default }`**：Cordis 的 Loader 行按
+ * *具名导出* 找插件（`apply` + `name` + `inject`），与已装插件一致的做法是
+ * 只有具名导出。多一个 `default` 会让模块同时具备两种插件形态，加载器取哪个
+ * 取决于内部判断，属于不必要的歧义。已装插件（`dsh-share` 等）实测都只有
+ * `apply` / `name`，没有 `default`。
+ */
 export { WorkspaceStore };
-export { apply as default };

@@ -116,8 +116,12 @@ afterAll(async () => {
 });
 
 describe('插件元信息', () => {
-  it('插件名、注入服务与路由前缀派生自同一个 id', () => {
-    expect(name).toBe('evcanvas');
+  // `name` 是 Cordis 的加载标识，必须等于**包名**：Loader 行写
+  // `name: dsh-evcanvas`，靠它解析到包。它与 `PLUGIN_META.id`（短标识，
+  // 用于路由/数据目录）是两个不同的东西，早先把两者混用导致插件加载不到。
+  it('插件名等于包名，与路由前缀用的短 id 区分开', () => {
+    expect(name).toBe('dsh-evcanvas');
+    expect(name).not.toBe(PLUGIN_META.id);
     expect(inject).toEqual(['webServer']);
     expect(PLUGIN_META.id).toBe('evcanvas');
     expect(ROUTE_PREFIX).toBe('/evcanvas');
