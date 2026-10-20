@@ -36,6 +36,8 @@ window.__ModuleLoader__.load({
     const TAB_KIND = 'evcanvas';
     /** 资源地址前缀。 */
     const ADDRESS_PREFIX = `dsh-resource://${TAB_KIND}/`;
+    /** 对话顶栏视图的 id（与「对话/轨迹/上下文/编队」并列的那个）。 */
+    const VIEW_ID = 'evcanvas';
 
     /** 画布页面地址（同源，由宿主侧静态路由提供）。 */
     const PAGE_URL = '/evcanvas/';
@@ -72,10 +74,37 @@ window.__ModuleLoader__.load({
       return { kind: TAB_KIND };
     }
 
+    /**
+     * 对话顶栏「视图」的正文：与右栏正文是同一个画布，只是挂的位置不同。
+     *
+     * 为什么两处都注册：用户既可以直接在会话顶栏切到画布（不离开会话），
+     * 也可以把画布作为右栏标签页常驻。两者渲染同一份内容，不存在第二套状态。
+     */
+    function CanvasView() {
+      return CanvasBody();
+    }
+
     return {
       inject: ['slots', 'sidebarRightTabs'],
       apply(ctx) {
-        // ① 注册 tab 类型：告诉右栏「这个地址归我管」
+        // ① 注册对话顶栏的「视图」入口：与「对话 / 轨迹 / 上下文 / 编队」同一排。
+        //
+        // 这是用户明确要求的入口位置。宿主把 `conversation.view` 渲染成
+        // ConversationRoot 顶部那排 role="tab" 的按钮；`label` 决定按钮文字，
+        // `order` 决定排在哪个位置（编队是 30，我们排它后面）。
+        ctx.slots.inject('conversation.view', () =>
+          ctx.slots.register(
+            {
+              name: 'conversation.view',
+              id: VIEW_ID,
+              order: 40,
+              label: () => 'EV Canvas',
+            },
+            CanvasView,
+          ),
+        );
+
+        // ② 注册右栏 tab 类型：告诉右栏「这个地址归我管」
         ctx.effect(
           () =>
             ctx.sidebarRightTabs.register({
@@ -89,12 +118,12 @@ window.__ModuleLoader__.load({
           'evcanvas: right-pane tab type',
         );
 
-        // ② 注册正文：key 必须与上面定义的 id 一致，否则渲染不出来
+        // ③ 注册正文：key 必须与上面定义的 id 一致，否则渲染不出来
         ctx.slots.inject('sidebar.right.pane.tab', () =>
           ctx.slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, CanvasBody),
         );
 
-        // ③ 「新标签页」菜单里加一项，让用户能找到入口
+        // ④ 「新标签页」菜单里加一项，让用户从右栏也能找到入口
         ctx.slots.inject('sidebar.right.tab.menu.item', () =>
           ctx.slots.register(
             {

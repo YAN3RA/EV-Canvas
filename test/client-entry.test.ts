@@ -95,6 +95,22 @@ describe('客户端入口', () => {
     expect(plugin.inject).toContain('sidebarRightTabs');
   });
 
+  it('在对话顶栏的视图位注册入口（与对话/轨迹/上下文/编队同一排）', async () => {
+    const { registered } = await loadClient();
+    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+    expect(view, '缺少 conversation.view 注册：用户点不到入口').toBeDefined();
+    expect(view.options.id).toBe('evcanvas');
+    // label 是函数（宿主延迟求值，便于切语言）
+    expect(typeof view.options.label).toBe('function');
+    expect(view.options.label()).toBe('EV Canvas');
+    // order 必须大于编队的 30，排在它后面
+    expect(view.options.order).toBeGreaterThan(30);
+    // 正文渲染出来是画布
+    const element = view.component();
+    expect(element.type).toBe('iframe');
+    expect(element.props.src).toBe('/evcanvas/');
+  });
+
   it('注册右栏标签类型，只认领自己的地址前缀', async () => {
     const { registered } = await loadClient();
     expect(registered.tabs).toHaveLength(1);
@@ -136,11 +152,13 @@ describe('客户端入口', () => {
     expect(opened).toEqual(['dsh-resource://evcanvas/canvas']);
   });
 
-  it('每处注册都包在 effect 里，便于宿主卸载时回收', async () => {
+  it('每处注册都包在 effect/inject 里，便于宿主卸载时回收', async () => {
     const { registered } = await loadClient();
-    // 标签类型 + 正文 + 菜单项 = 3 次注册，都应有对应 effect
+    // 1 个右栏 tab 类型 + 3 个插槽（对话视图 / 右栏正文 / 新标签页菜单）
     expect(registered.tabs).toHaveLength(1);
-    expect(registered.slots).toHaveLength(2);
+    expect(registered.slots).toHaveLength(3);
+    const names = registered.slots.map(item => item.options.name).sort();
+    expect(names).toEqual(['conversation.view', 'sidebar.right.pane.tab', 'sidebar.right.tab.menu.item']);
     const labels = registered.effects.map(item => item.label);
     expect(labels.some(label => /tab type/.test(label))).toBe(true);
   });
