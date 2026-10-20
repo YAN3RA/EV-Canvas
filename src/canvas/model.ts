@@ -1,4 +1,3 @@
-// @ts-nocheck -- TODO(types): 迁移自 dsh-synapnova@3fd1d00 canvas/model.js，行为完整、类型标注待补。
 // 来源: dsh-synapnova@3fd1d00 canvas/model.js
 
 /**
@@ -18,7 +17,137 @@
  * Field ownership: this file only READS `layout` / `regions` / `annotations`
  * and the projection threads it derives cards from. Writing is `commands.js`;
  * projection updates never touch layout fields.
+ *
+ * 类型口径：入参是**不受信的快照**，因此一律以 `unknown` 进、经守卫收窄；
+ * 输出是本模块自己构造的形状，用下面的具名接口精确描述。投影来源的文本字段
+ * （`title` / `question` / `sourceSeq`）在冻结 schema 里并未强制类型，这里按
+ * 既有契约断言而不做任何转换——转换会改变导出行为。
  */
+
+/** 二维坐标。 */
+export interface Position {
+  x: number;
+  y: number;
+}
+
+/** 视口（相机）位置与缩放。 */
+export interface Viewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+/** 分区框。 */
+export interface CanvasRegion {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 批注：恰好挂在卡片或分区之一。 */
+export interface CanvasAnnotation {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  targetCardId: string | null;
+  targetRegionId: string | null;
+}
+
+/** 批注来源是否还在画布上（计算得到，从不持久化）。 */
+export type AnnotationAvailability = 'ok' | 'missing-source';
+
+/** 带可用性判定的批注。 */
+export interface CanvasAnnotationView extends CanvasAnnotation {
+  availability: AnnotationAvailability;
+}
+
+/** 一张卡片。 */
+export interface CanvasCard {
+  id: string;
+  threadId: string;
+  /** 线程级占位卡片（线程还没有用户提问）时为 null。 */
+  userQuestionSeq: number | null;
+  /** 线程内的前驱卡片；分叉的第一张卡由谱系步骤改为跨线程父卡片。 */
+  parentId: string | null;
+  /** 仅当父链是**推断**出来（无 anchor 也无种子边界）时出现。 */
+  parentIdInferred?: true;
+  threadParentId: string | null;
+  previousCardId: string | null;
+  /** 投影事件序号；线程级占位卡片没有（`undefined`）。 */
+  sourceSeq: number | undefined;
+  title: string;
+  question: string;
+  naturalPosition: Position;
+  /** 手工保存的位置；未手工放置过为 null。 */
+  position: Position | null;
+  positionLocked: boolean;
+  collapsed: boolean;
+}
+
+/** 线程摘要。 */
+export interface CanvasThreadSummary {
+  id: string;
+  title: string;
+  parentId: string | null;
+  dshSessionId: string | null;
+  color: string | null;
+}
+
+/** 被丢弃的输入分支（供调用方提示，不抛错）。 */
+export interface SkippedBranch {
+  area: string;
+  reason: string;
+}
+
+/** 一个工作区修订的完整画布模型（返回时已深冻结）。 */
+export interface CanvasModel {
+  workspaceId: string | null;
+  revision: number | null;
+  projectionEpoch: number | null;
+  viewport: Viewport;
+  cards: CanvasCard[];
+  cardsById: Record<string, CanvasCard>;
+  cardOrder: string[];
+  collapsedCardIds: string[];
+  threads: CanvasThreadSummary[];
+  regions: CanvasRegion[];
+  regionsById: Record<string, CanvasRegion>;
+  annotations: CanvasAnnotationView[];
+  annotationsById: Record<string, CanvasAnnotationView>;
+  layoutCards: Record<string, Position>;
+  unmatchedCardIds: string[];
+  unmatchedCollapsedIds: string[];
+  skipped: SkippedBranch[];
+}
+
+/** `readLayout` 的结果：冻结文档里的布局字段 + 可选的 UI 分支锚点。 */
+export interface LayoutView {
+  cards: Record<string, Position>;
+  collapsed: Record<string, true>;
+  viewport: Viewport;
+  regions: CanvasRegion[];
+  annotations: CanvasAnnotation[];
+  branchAnchors: Record<string, string>;
+}
+
+/** `layoutBundle` 的结果：命令层操作的那份布局包（不含 materials）。 */
+export interface CanvasLayoutBundle {
+  cards: Record<string, Position>;
+  collapsed: Record<string, true>;
+  viewport: Viewport;
+  regions: CanvasRegion[];
+  annotations: CanvasAnnotation[];
+}
+
+/** 分离卡片 id 的结果。 */
+export interface ParsedCardId {
+  threadId: string;
+  userQuestionSeq: number | null;
+}
 
 /** Separator of the frozen card-id form: `<threadId>:<userQuestionSeq>`. */
 export const CARD_ID_SEPARATOR = ':'
@@ -30,16 +159,16 @@ export const CARD_ID_SEPARATOR = ':'
  */
 export const NATURAL_ORIGIN = Object.freeze({ x: 86, y: 82 })
 export const NATURAL_STEP_X = 365
-export const DEFAULT_VIEWPORT = Object.freeze({ x: 0, y: 0, zoom: 1 })
+export const DEFAULT_VIEWPORT: Readonly<Viewport> = Object.freeze({ x: 0, y: 0, zoom: 1 })
 
 /** A card placeholder that stands for the whole thread (no user turns yet). */
-export function threadCardId(threadId) {
+export function threadCardId(threadId: string): string {
   assertThreadId(threadId)
   return threadId
 }
 
 /** The canonical, index-free card id for one user turn. */
-export function questionCardId(threadId, userQuestionSeq) {
+export function questionCardId(threadId: string, userQuestionSeq: number): string {
   assertThreadId(threadId)
   if (!Number.isSafeInteger(userQuestionSeq) || userQuestionSeq < 0) throw new TypeError('userQuestionSeq 必须是 0 基安全整数')
   return `${threadId}${CARD_ID_SEPARATOR}${userQuestionSeq}`
@@ -50,43 +179,71 @@ export function questionCardId(threadId, userQuestionSeq) {
  * separator themselves (host session ids are opaque), so the numeric tail is
  * what identifies the turn; anything else is a thread-level card.
  */
-export function parseCardId(cardId) {
+export function parseCardId(cardId: unknown): ParsedCardId | null {
   if (typeof cardId !== 'string' || cardId === '') return null
   const match = /^(.*):(\d+)$/.exec(cardId)
   if (match === null) return { threadId: cardId, userQuestionSeq: null }
-  return { threadId: match[1], userQuestionSeq: Number(match[2]) }
+  const threadId = match[1] ?? ''
+  return { threadId, userQuestionSeq: Number(match[2]) }
 }
 
-function assertThreadId(threadId) {
+function assertThreadId(threadId: unknown): asserts threadId is string {
   if (typeof threadId !== 'string' || threadId === '') throw new TypeError('threadId 必须是非空字符串')
 }
 
-function isPlainObject(value) {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function finite(value) {
+function finite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
-function deepFreeze(value) {
+/**
+ * 投影文本字段的窄化读取。
+ *
+ * 冻结 schema 只校验 `message.id` / `message.sourceSeq`，没有强制 `text` /
+ * `title` 是字符串；旧实现把这些值**原样**写进模型。这里保持原样透传，
+ * 只在类型层面按既有契约记为 `string`——绝不插入 `String()` 或兜底转换，
+ * 那会让导出结果与旧版不一致。
+ */
+function projectedText(value: unknown): string {
+  return value as string
+}
+
+/** `Number.isSafeInteger` 的类型守卫形式（守卫本身不改变判定结果）。 */
+function isEventSeq(value: unknown): value is number {
+  return Number.isSafeInteger(value)
+}
+
+/** `Number.isInteger` 的类型守卫形式（判定结果与直接调用完全一致）。 */
+function isInteger(value: unknown): value is number {
+  return Number.isInteger(value)
+}
+
+/** 取字段里的安全整数，非安全整数/非数字一律 `undefined`（与原三元表达式等价）。 */
+function safeIntegerField(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined
+}
+
+function deepFreeze<T>(value: T): T {
   if (Array.isArray(value)) {
     for (const item of value) deepFreeze(item)
-    return Object.freeze(value)
+    return Object.freeze(value) as unknown as T
   }
   if (isPlainObject(value)) {
     for (const key of Object.keys(value)) deepFreeze(value[key])
-    return Object.freeze(value)
+    return Object.freeze(value) as unknown as T
   }
   return value
 }
 
-function copyPosition(value) {
+function copyPosition(value: unknown): Position | null {
   if (!isPlainObject(value) || !finite(value.x) || !finite(value.y)) return null
   return { x: value.x, y: value.y }
 }
 
-function normalizeViewport(value) {
+function normalizeViewport(value: unknown): Viewport {
   if (!isPlainObject(value)) return { ...DEFAULT_VIEWPORT }
   const x = finite(value.x) ? value.x : 0
   const y = finite(value.y) ? value.y : 0
@@ -94,8 +251,14 @@ function normalizeViewport(value) {
   return { x, y, zoom }
 }
 
-function messagesOf(thread) {
-  return Array.isArray(thread?.messages) ? thread.messages : []
+function messagesOf(thread: Record<string, unknown>): unknown[] {
+  return Array.isArray(thread['messages']) ? thread['messages'] : []
+}
+
+/** 一条投影消息（形状不受信，只按需读取 `kind` / `sourceSeq` / `text`）。 */
+interface Turn {
+  message: Record<string, unknown>;
+  userQuestionSeq: number;
 }
 
 /**
@@ -105,23 +268,23 @@ function messagesOf(thread) {
  * stays the same when a later message arrives or when the thread array moves.
  * Injected/non-user messages never consume an ordinal.
  */
-function turnsOf(thread) {
-  const turns = []
+function turnsOf(thread: Record<string, unknown>): Turn[] {
+  const turns: Turn[] = []
   for (const message of messagesOf(thread)) {
-    if (message?.kind !== 'user') continue
+    if (!isPlainObject(message) || message['kind'] !== 'user') continue
     turns.push({ message, userQuestionSeq: turns.length })
   }
   return turns
 }
 
-function copyRegion(region) {
+function copyRegion(region: unknown): CanvasRegion | null {
   if (!isPlainObject(region) || typeof region.id !== 'string' || region.id === '') return null
   if (!finite(region.x) || !finite(region.y) || !finite(region.w) || !finite(region.h)) return null
   if (region.w <= 0 || region.h <= 0) return null
   return { id: region.id, name: typeof region.name === 'string' ? region.name : '', x: region.x, y: region.y, w: region.w, h: region.h }
 }
 
-function copyAnnotation(annotation) {
+function copyAnnotation(annotation: unknown): CanvasAnnotation | null {
   if (!isPlainObject(annotation) || typeof annotation.id !== 'string' || annotation.id === '') return null
   if (!finite(annotation.x) || !finite(annotation.y) || typeof annotation.text !== 'string') return null
   const hasCard = typeof annotation.targetCardId === 'string' && annotation.targetCardId !== ''
@@ -134,13 +297,13 @@ function copyAnnotation(annotation) {
     x: annotation.x,
     y: annotation.y,
     text: annotation.text,
-    targetCardId: hasCard ? annotation.targetCardId : null,
-    targetRegionId: hasRegion ? annotation.targetRegionId : null,
+    targetCardId: hasCard ? (annotation.targetCardId as string) : null,
+    targetRegionId: hasRegion ? (annotation.targetRegionId as string) : null,
   }
 }
 
-function annotationsList(value) {
-  const list = []
+function annotationsList(value: unknown): CanvasAnnotation[] {
+  const list: CanvasAnnotation[] = []
   if (!Array.isArray(value)) return list
   for (const item of value) {
     const annotation = copyAnnotation(item)
@@ -149,8 +312,8 @@ function annotationsList(value) {
   return list
 }
 
-function regionsList(value) {
-  const list = []
+function regionsList(value: unknown): CanvasRegion[] {
+  const list: CanvasRegion[] = []
   if (!Array.isArray(value)) return list
   for (const item of value) {
     const region = copyRegion(item)
@@ -166,28 +329,28 @@ function regionsList(value) {
  * or a workspace document (`{ layout, regions, annotations }`). Returns plain
  * immutable copies so callers never alias Store objects.
  */
-export function readLayout(snapshot = {}) {
+export function readLayout(snapshot: unknown = {}): LayoutView {
   if (!isPlainObject(snapshot)) throw new TypeError('snapshot 必须是对象')
-  const layout = isPlainObject(snapshot.layout) ? snapshot.layout : snapshot
-  const cards = {}
-  if (isPlainObject(layout.cards)) {
-    for (const [cardId, position] of Object.entries(layout.cards)) {
+  const layout = isPlainObject(snapshot['layout']) ? snapshot['layout'] : snapshot
+  const cards: Record<string, Position> = {}
+  if (isPlainObject(layout['cards'])) {
+    for (const [cardId, position] of Object.entries(layout['cards'])) {
       const copy = copyPosition(position)
       if (copy !== null) cards[cardId] = copy
     }
   }
-  const collapsed = {}
-  if (isPlainObject(layout.collapsed)) {
-    for (const [cardId, value] of Object.entries(layout.collapsed)) if (value === true) collapsed[cardId] = true
+  const collapsed: Record<string, true> = {}
+  if (isPlainObject(layout['collapsed'])) {
+    for (const [cardId, value] of Object.entries(layout['collapsed'])) if (value === true) collapsed[cardId] = true
   }
-  const viewport = normalizeViewport(layout.viewport)
-  const regions = regionsList(snapshot.regions)
-  const annotations = annotationsList(snapshot.annotations)
+  const viewport = normalizeViewport(layout['viewport'])
+  const regions = regionsList(snapshot['regions'])
+  const annotations = annotationsList(snapshot['annotations'])
   // Branch anchors are UI state (the exact card the user branched from), not a
   // persisted document field — so they arrive through the layout bundle and are
   // optional. Without them the lineage pass falls back to the seed boundary.
-  const branchAnchors = {}
-  const rawAnchors = layout.branchAnchors ?? snapshot.branchAnchors
+  const branchAnchors: Record<string, string> = {}
+  const rawAnchors: unknown = layout['branchAnchors'] ?? snapshot['branchAnchors']
   if (isPlainObject(rawAnchors)) {
     for (const [threadId, cardId] of Object.entries(rawAnchors)) {
       if (typeof threadId === 'string' && typeof cardId === 'string' && cardId !== '') branchAnchors[threadId] = cardId
@@ -203,44 +366,47 @@ export function readLayout(snapshot = {}) {
   }
 }
 
-function buildCards(threads, layout) {
-  const cards = []
-  const cardsById = {}
-  const threadsSummary = []
+function buildCards(threads: readonly unknown[], layout: LayoutView): { cards: CanvasCard[]; cardsById: Record<string, CanvasCard>; threads: CanvasThreadSummary[] } {
+  const cards: CanvasCard[] = []
+  const cardsById: Record<string, CanvasCard> = {}
+  const threadsSummary: CanvasThreadSummary[] = []
   // Per-thread card list, needed to resolve a fork's inherited parent card.
-  const cardsByThread = new Map()
+  const cardsByThread = new Map<string, CanvasCard[]>()
   for (const thread of threads) {
     if (!isPlainObject(thread) || typeof thread.id !== 'string' || thread.id === '') continue
+    const threadId = thread.id
     const turns = turnsOf(thread)
     threadsSummary.push({
-      id: thread.id,
-      title: thread.dshSessionTitle ?? thread.title ?? '',
+      id: threadId,
+      title: projectedText(thread.dshSessionTitle ?? thread.title ?? ''),
       parentId: typeof thread.parentId === 'string' ? thread.parentId : null,
       dshSessionId: typeof thread.dshSessionId === 'string' ? thread.dshSessionId : null,
       color: typeof thread.color === 'string' ? thread.color : null,
     })
-    const firstId = turns.length === 0 ? threadCardId(thread.id) : questionCardId(thread.id, 0)
-    let previousNatural = { ...NATURAL_ORIGIN }
-    let previousId = null
-    const threadCards = []
+    const firstId = turns.length === 0 ? threadCardId(threadId) : questionCardId(threadId, 0)
+    let previousNatural: Position = { ...NATURAL_ORIGIN }
+    let previousId: string | null = null
+    const threadCards: CanvasCard[] = []
     for (let index = 0; index < Math.max(turns.length, 1); index++) {
       const turn = turns[index]
-      const id = turns.length === 0 ? firstId : questionCardId(thread.id, turn.userQuestionSeq)
+      // 循环上界保证：turns 为空时 `turn` 必为 undefined，非空时必存在。
+      // 两种写法在该循环内等价，只是把「线程无用户提问」这一事实挂在 turn 上。
+      const id = turn === undefined ? firstId : questionCardId(threadId, turn.userQuestionSeq)
       const stored = layout.cards[id]
-      const naturalPosition = index === 0 ? { ...NATURAL_ORIGIN } : { x: previousNatural.x + NATURAL_STEP_X, y: previousNatural.y }
-      const position = stored === undefined ? null : { x: stored.x, y: stored.y }
-      const card = {
+      const naturalPosition: Position = index === 0 ? { ...NATURAL_ORIGIN } : { x: previousNatural.x + NATURAL_STEP_X, y: previousNatural.y }
+      const position: Position | null = stored === undefined ? null : { x: stored.x, y: stored.y }
+      const card: CanvasCard = {
         id,
-        threadId: thread.id,
-        userQuestionSeq: turns.length === 0 ? null : turn.userQuestionSeq,
+        threadId,
+        userQuestionSeq: turn === undefined ? null : turn.userQuestionSeq,
         // Intra-thread predecessor. A fork's FIRST card gets its cross-thread
         // parent assigned in the lineage pass below.
         parentId: previousId,
         threadParentId: typeof thread.parentId === 'string' ? thread.parentId : null,
         previousCardId: previousId,
-        sourceSeq: turns.length === 0 ? undefined : turn.message.sourceSeq,
-        title: thread.dshSessionTitle ?? thread.title ?? '',
-        question: turns.length === 0 ? '' : (turn.message.text ?? ''),
+        sourceSeq: turn === undefined ? undefined : (turn.message['sourceSeq'] as number | undefined),
+        title: projectedText(thread.dshSessionTitle ?? thread.title ?? ''),
+        question: projectedText(turn === undefined ? '' : (turn.message['text'] ?? '')),
         naturalPosition,
         position,
         positionLocked: position !== null,
@@ -252,7 +418,7 @@ function buildCards(threads, layout) {
       previousNatural = naturalPosition
       previousId = id
     }
-    cardsByThread.set(thread.id, threadCards)
+    cardsByThread.set(threadId, threadCards)
   }
 
   // ── Lineage: wire the cross-thread branch parent onto the child's FIRST card ──
@@ -281,7 +447,7 @@ function buildCards(threads, layout) {
     // ever assigns to this one card, leaving later cards' intra-thread chain alone.
     const parentThreadId = typeof thread.parentId === 'string' && thread.parentId !== '' ? thread.parentId : null
     if (parentThreadId === null) continue
-    const anchor = layout.branchAnchors?.[thread.id]
+    const anchor = layout.branchAnchors[thread.id]
     if (typeof anchor === 'string' && anchor !== '' && cardsById[anchor] !== undefined) {
       firstChild.parentId = anchor
       continue
@@ -293,11 +459,11 @@ function buildCards(threads, layout) {
     // the CHILD's event stream, so treating it as "how much of the parent was
     // inherited" silently picks an arbitrary parent card and reports it as
     // proven. Without a real `sourceSeedLength` the link is honestly inferred.
-    const seedLength = Number.isSafeInteger(thread.sourceSeedLength) ? thread.sourceSeedLength : undefined
-    if (Number.isSafeInteger(seedLength)) {
+    const seedLength = safeIntegerField(thread['sourceSeedLength'])
+    if (seedLength !== undefined) {
       // Strictly below the seed boundary: the child inherited those parent events,
       // so the last one before the boundary is the Turn it forked from.
-      const inherited = parentCards.filter(candidate => Number.isInteger(candidate.sourceSeq) && candidate.sourceSeq < seedLength).at(-1)
+      const inherited = parentCards.filter(candidate => isInteger(candidate.sourceSeq) && candidate.sourceSeq < seedLength).at(-1)
       if (inherited !== undefined) {
         firstChild.parentId = inherited.id
         continue
@@ -307,7 +473,10 @@ function buildCards(threads, layout) {
     // card so the branch is at least visibly connected, and RECORD that the link
     // was inferred rather than proven — a consumer that needs certainty (or a
     // preview that must not overstate) can check this flag.
-    firstChild.parentId = parentCards.at(-1).id
+    const lastParent = parentCards.at(-1)
+    // 上一行的 `length === 0` 已排除空数组，这里只是把同一个事实告诉类型系统。
+    if (lastParent === undefined) continue
+    firstChild.parentId = lastParent.id
     firstChild.parentIdInferred = true
   }
 
@@ -321,8 +490,13 @@ function buildCards(threads, layout) {
  * only reads its parent's card list, which is already complete), but keeping the
  * declaration order makes the output stable for a given snapshot.
  */
-function threadsByIterationOrder(threads) {
-  return threads.filter(thread => isPlainObject(thread) && typeof thread.id === 'string' && thread.id !== '')
+function threadsByIterationOrder(threads: readonly unknown[]): (Record<string, unknown> & { id: string })[] {
+  const kept: (Record<string, unknown> & { id: string })[] = []
+  for (const thread of threads) {
+    if (!isPlainObject(thread) || typeof thread.id !== 'string' || thread.id === '') continue
+    kept.push(thread as Record<string, unknown> & { id: string })
+  }
+  return kept
 }
 
 /**
@@ -334,36 +508,39 @@ function threadsByIterationOrder(threads) {
  * `unmatchedCardIds` (material nodes keep their positions this way); they are
  * never dropped just because this module does not know their type.
  */
-export function buildCanvasModel(snapshot = {}) {
+export function buildCanvasModel(snapshot: unknown = {}): CanvasModel {
   if (!isPlainObject(snapshot)) throw new TypeError('snapshot 必须是对象')
-  const threads = Array.isArray(snapshot.projection?.threads)
-    ? snapshot.projection.threads
-    : Array.isArray(snapshot.threads) ? snapshot.threads : []
+  const projection = isPlainObject(snapshot['projection']) ? snapshot['projection'] : null
+  const threads: readonly unknown[] = projection !== null && Array.isArray(projection['threads'])
+    ? projection['threads']
+    : Array.isArray(snapshot['threads']) ? snapshot['threads'] : []
   const layout = readLayout(snapshot)
   const { cards, cardsById, threads: threadsSummary } = buildCards(threads, layout)
   const knownIds = new Set(cards.map(card => card.id))
   const unmatchedCardIds = Object.keys(layout.cards).filter(cardId => !knownIds.has(cardId))
   const collapsedCardIds = Object.keys(layout.collapsed).filter(cardId => knownIds.has(cardId))
   const unmatchedCollapsedIds = Object.keys(layout.collapsed).filter(cardId => !knownIds.has(cardId))
-  const regionsById = {}
+  const regionsById: Record<string, CanvasRegion> = {}
   for (const region of layout.regions) regionsById[region.id] = region
-  const skipped = []
+  const skipped: SkippedBranch[] = []
   // Availability is computed, never stored: a card or region can disappear from
   // the projection while its note must survive with an explicit marker.
-  const annotations = layout.annotations.map(annotation => {
-    const availability = annotation.targetCardId !== null
+  const annotations: CanvasAnnotationView[] = layout.annotations.map(annotation => {
+    // `targetRegionId` 走到这里时按冻结形状必为字符串；原实现对 `null` 也是同一次
+    // JS 属性查找（`regionsById[null]` → `regionsById["null"]`），断言不改运行时语义。
+    const availability: AnnotationAvailability = annotation.targetCardId !== null
       ? (knownIds.has(annotation.targetCardId) ? 'ok' : 'missing-source')
-      : (regionsById[annotation.targetRegionId] === undefined ? 'missing-source' : 'ok')
+      : (regionsById[annotation.targetRegionId as string] === undefined ? 'missing-source' : 'ok')
     return { ...annotation, availability }
   })
-  const annotationsById = {}
+  const annotationsById: Record<string, CanvasAnnotationView> = {}
   for (const annotation of annotations) annotationsById[annotation.id] = annotation
-  if (Array.isArray(snapshot.regions) && snapshot.regions.length !== layout.regions.length) skipped.push({ area: 'regions', reason: 'invalid' })
-  if (Array.isArray(snapshot.annotations) && snapshot.annotations.length !== layout.annotations.length) skipped.push({ area: 'annotations', reason: 'invalid' })
+  if (Array.isArray(snapshot['regions']) && snapshot['regions'].length !== layout.regions.length) skipped.push({ area: 'regions', reason: 'invalid' })
+  if (Array.isArray(snapshot['annotations']) && snapshot['annotations'].length !== layout.annotations.length) skipped.push({ area: 'annotations', reason: 'invalid' })
   return deepFreeze({
-    workspaceId: typeof snapshot.id === 'string' ? snapshot.id : (typeof snapshot.workspaceId === 'string' ? snapshot.workspaceId : null),
-    revision: Number.isSafeInteger(snapshot.revision) ? snapshot.revision : null,
-    projectionEpoch: Number.isSafeInteger(snapshot.projectionEpoch) ? snapshot.projectionEpoch : null,
+    workspaceId: typeof snapshot['id'] === 'string' ? snapshot['id'] : (typeof snapshot['workspaceId'] === 'string' ? snapshot['workspaceId'] : null),
+    revision: isEventSeq(snapshot['revision']) ? snapshot['revision'] : null,
+    projectionEpoch: isEventSeq(snapshot['projectionEpoch']) ? snapshot['projectionEpoch'] : null,
     viewport: layout.viewport,
     cards,
     cardsById,
@@ -382,52 +559,61 @@ export function buildCanvasModel(snapshot = {}) {
 }
 
 /** One card, or null. */
-export function getCard(model, cardId) {
+export function getCard(model: CanvasModel | null | undefined, cardId: string): CanvasCard | null {
   return model?.cardsById?.[cardId] ?? null
 }
 
 /** Stored (manual) position, or null when the card was never placed manually. */
-export function getCardPosition(model, cardId) {
+export function getCardPosition(model: CanvasModel | null | undefined, cardId: string): Position | null {
   const position = model?.layoutCards?.[cardId]
   return position === undefined ? null : { x: position.x, y: position.y }
 }
 
 /** Position to draw at: manual position when present, else natural fallback. */
-export function getResolvedPosition(model, cardId) {
+export function getResolvedPosition(model: CanvasModel | null | undefined, cardId: string): Position | null {
   const card = getCard(model, cardId)
   if (card === null) return null
   return card.position === null ? { ...card.naturalPosition } : { x: card.position.x, y: card.position.y }
 }
 
-export function isCardCollapsed(model, cardId) {
+export function isCardCollapsed(model: CanvasModel | null | undefined, cardId: string): boolean {
   return model?.cardsById?.[cardId]?.collapsed === true
 }
 
-export function getRegion(model, regionId) {
+export function getRegion(model: CanvasModel | null | undefined, regionId: string): CanvasRegion | null {
   return model?.regionsById?.[regionId] ?? null
 }
 
-export function getAnnotation(model, annotationId) {
+export function getAnnotation(model: CanvasModel | null | undefined, annotationId: string): CanvasAnnotationView | null {
   return model?.annotationsById?.[annotationId] ?? null
 }
 
-export function getViewport(model) {
-  return { ...(model?.viewport ?? DEFAULT_VIEWPORT) }
+/**
+ * 视口副本。
+ *
+ * 入参保持 `unknown`：`canvas/navigation` 等调用方把任意模型形状传进来，旧实现
+ * 用 `model?.viewport ?? DEFAULT_VIEWPORT` 天然接受任何值。这里逐字保留那条
+ * 可选访问 + 空值合并，只补类型断言——不做额外的形状校验，否则会改变
+ * 「模型缺 viewport 时回落到默认视口」以外的行为。
+ */
+export function getViewport(model: unknown): Viewport {
+  const source = model as { viewport?: unknown } | null | undefined
+  return { ...((source?.viewport ?? DEFAULT_VIEWPORT) as Viewport) }
 }
 
 /** Annotations attached to a card, including ones whose card vanished. */
-export function annotationsForCard(model, cardId) {
+export function annotationsForCard(model: CanvasModel | null | undefined, cardId: string): CanvasAnnotationView[] {
   if (typeof cardId !== 'string' || cardId === '') return []
   return (model?.annotations ?? []).filter(annotation => annotation.targetCardId === cardId)
 }
 
-export function annotationsForRegion(model, regionId) {
+export function annotationsForRegion(model: CanvasModel | null | undefined, regionId: string): CanvasAnnotationView[] {
   if (typeof regionId !== 'string' || regionId === '') return []
   return (model?.annotations ?? []).filter(annotation => annotation.targetRegionId === regionId)
 }
 
 /** Annotations whose target is gone; they stay, marked `missing-source`. */
-export function missingSourceAnnotations(model) {
+export function missingSourceAnnotations(model: CanvasModel | null | undefined): CanvasAnnotationView[] {
   return (model?.annotations ?? []).filter(annotation => annotation.availability === 'missing-source')
 }
 
@@ -438,11 +624,11 @@ export function missingSourceAnnotations(model) {
  * detaches association — membership is computed, never stored, so no card can
  * be removed by deleting a box.
  */
-export function cardsInsideRegion(model, regionId) {
+export function cardsInsideRegion(model: CanvasModel | null | undefined, regionId: string): string[] {
   const region = getRegion(model, regionId)
   if (region === null) return []
-  const inside = []
-  for (const card of model.cards) {
+  const inside: string[] = []
+  for (const card of model?.cards ?? []) {
     const position = card.position === null ? card.naturalPosition : card.position
     if (position.x >= region.x && position.x <= region.x + region.w && position.y >= region.y && position.y <= region.y + region.h) inside.push(card.id)
   }
@@ -455,10 +641,10 @@ export function cardsInsideRegion(model, regionId) {
  * `layoutCards` is copied wholesale (not only known card ids) so unknown
  * entities such as material nodes keep their coordinates.
  */
-export function layoutBundle(model) {
-  const cards = {}
+export function layoutBundle(model: CanvasModel | null | undefined): CanvasLayoutBundle {
+  const cards: Record<string, Position> = {}
   for (const [cardId, position] of Object.entries(model?.layoutCards ?? {})) cards[cardId] = { x: position.x, y: position.y }
-  const collapsed = {}
+  const collapsed: Record<string, true> = {}
   for (const cardId of model?.collapsedCardIds ?? []) collapsed[cardId] = true
   return {
     cards,

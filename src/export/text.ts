@@ -1,4 +1,3 @@
-// @ts-nocheck -- TODO(types): 迁移自 dsh-synapnova@3fd1d00 export/text.js，行为完整、类型标注待补。
 // 来源: dsh-synapnova@3fd1d00 export/text.js
 
 /**
@@ -45,6 +44,8 @@
  * Card ids follow the frozen canvas form `<threadId>:<userQuestionSeq>` owned by
  * `canvas/model.js` (0-based, projection order, only `kind === 'user'` messages
  * consume an ordinal). Injection/assistant/todo rows never advance it.
+ *
+ * 类型口径：入参是**不受信的快照**，全程按 `unknown` + 守卫收窄；输出只有字符串。
  */
 
 import { MAX_PROJECTION_LENGTH } from '@/shared/schema'
@@ -55,8 +56,63 @@ export const CSV_BOM = '\uFEFF'
 const CSV_NEWLINE = '\r\n'
 const UNTITLED_SESSION = '未命名会话'
 
+/** 导出选项。 */
+export interface MarkdownOptions {
+  maxBodyChars?: unknown;
+}
+
+/** 投影消息里本模块读取的字段（形状不受信）。 */
+type ProjectedRecord = Record<string, unknown>
+
+/** 一条投影条目 + 它所属的线程与轮次序号。 */
+interface ExportEntry {
+  thread: ProjectedRecord;
+  message: ProjectedRecord;
+  kind: string;
+  seq: number | null;
+  userQuestionSeq: number | null;
+}
+
+/** 一个会话分组的覆盖率声明。 */
+interface CoverageSummary {
+  ranges: number[][];
+  historyComplete: boolean;
+  textTruncated: boolean;
+}
+
+/** 一个会话分组。 */
+interface ExportGroup {
+  key: string;
+  threads: ProjectedRecord[];
+  entries: ExportEntry[];
+  title: string;
+  dshSessionId: string | null;
+  coverage: CoverageSummary;
+}
+
+/** 一轮：用户提问 + 它后面所有非用户条目。 */
+interface ExportTurn {
+  entry: ExportEntry;
+  body: ExportEntry[];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * 旧代码的宽松对象守卫：`x && typeof x === 'object'`。
+ *
+ * 与 `isPlainObject` 的差别是**接受数组**。导出层用它做「判空过滤」，若换成
+ * 排除数组的版本，数组元素会被丢掉，`材料（N 项）`／`未完成的工具记录 N 条`
+ * 这类计数就会变——所以这里逐字保留原来的判定口径。
+ */
+function isObjectLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
 /** Inline-code span that survives a value containing backticks. */
-function inlineCode(value) {
+function inlineCode(value: unknown): string {
   const text = String(value)
   const longest = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0)
   const fence = '`'.repeat(longest + 1)
@@ -64,20 +120,20 @@ function inlineCode(value) {
 }
 
 /** Fenced-block opener long enough that the body can never close it early. */
-function fenceFor(text) {
+function fenceFor(text: string): string {
   const longest = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0)
   return '`'.repeat(Math.max(3, longest + 1))
 }
 
 /** One-line clip for tool arguments/results so a dump never flattens the turn. */
-function clipInline(value, limit = 160) {
+function clipInline(value: unknown, limit = 160): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value ?? '')
   const flat = String(text).replaceAll(/\s+/g, ' ').trim()
   return flat.length > limit ? `${flat.slice(0, limit)}…` : flat
 }
 
 /** Render one block of body text with truncation accounting. */
-function bodyBlock(text, maxBodyChars) {
+function bodyBlock(text: unknown, maxBodyChars: number): string {
   const raw = typeof text === 'string' ? text : String(text ?? '')
   const clipped = raw.length > maxBodyChars
   const shown = clipped ? raw.slice(0, maxBodyChars) : raw
@@ -89,44 +145,45 @@ function bodyBlock(text, maxBodyChars) {
   return lines.join('\n')
 }
 
-function threadsOf(snapshot) {
-  const threads = snapshot?.projection?.threads
-  return Array.isArray(threads) ? threads.filter(thread => thread && typeof thread === 'object') : []
+function threadsOf(snapshot: unknown): ProjectedRecord[] {
+  const projection = isPlainObject(snapshot) ? snapshot['projection'] : undefined
+  const threads = isPlainObject(projection) ? projection['threads'] : undefined
+  return Array.isArray(threads) ? threads.filter(isObjectLike) : []
 }
 
-function listOf(snapshot, field) {
-  const list = snapshot?.[field]
-  return Array.isArray(list) ? list.filter(item => item && typeof item === 'object') : []
+function listOf(snapshot: unknown, field: string): ProjectedRecord[] {
+  const list = isPlainObject(snapshot) ? snapshot[field] : undefined
+  return Array.isArray(list) ? list.filter(isObjectLike) : []
 }
 
 /** Collapse a value to one line so it can never break a heading or a list item. */
-function oneLine(value) {
+function oneLine(value: unknown): string {
   return String(value).replaceAll(/\s+/g, ' ').trim()
 }
 
 /** Session display title: the DSH session title wins, then the thread title. */
-function displayTitle(thread) {
-  for (const candidate of [thread.dshSessionTitle, thread.title]) {
+function displayTitle(thread: ProjectedRecord): string {
+  for (const candidate of [thread['dshSessionTitle'], thread['title']]) {
     if (typeof candidate === 'string' && candidate.trim() !== '') return oneLine(candidate)
   }
   return UNTITLED_SESSION
 }
 
-function messageKind(message) {
-  return typeof message.kind === 'string' && message.kind !== '' ? message.kind : 'unknown'
+function messageKind(message: ProjectedRecord): string {
+  return typeof message['kind'] === 'string' && message['kind'] !== '' ? message['kind'] : 'unknown'
 }
 
-function seqOf(message) {
-  return Number.isSafeInteger(message.sourceSeq) ? message.sourceSeq : null
+function seqOf(message: ProjectedRecord): number | null {
+  return Number.isSafeInteger(message['sourceSeq']) ? (message['sourceSeq'] as number) : null
 }
 
 /** One thread's messages in projection order, with 0-based user ordinals. */
-function entriesOf(thread) {
-  const messages = Array.isArray(thread.messages) ? thread.messages : []
-  const entries = []
+function entriesOf(thread: ProjectedRecord): ExportEntry[] {
+  const messages = Array.isArray(thread['messages']) ? thread['messages'] : []
+  const entries: ExportEntry[] = []
   let userQuestionSeq = 0
   for (const message of messages) {
-    if (!message || typeof message !== 'object') continue
+    if (!isPlainObject(message)) continue
     const isUser = messageKind(message) === 'user'
     entries.push({
       thread,
@@ -140,20 +197,20 @@ function entriesOf(thread) {
   return entries
 }
 
-function coverageOf(thread) {
-  const coverage = thread.coverage && typeof thread.coverage === 'object' ? thread.coverage : null
-  const ranges = Array.isArray(coverage?.ranges)
-    ? coverage.ranges.filter(range => Array.isArray(range) && range.length === 2 && Number.isSafeInteger(range[0]) && Number.isSafeInteger(range[1]))
-    : []
+function coverageOf(thread: ProjectedRecord): CoverageSummary {
+  const coverage = isPlainObject(thread['coverage']) ? thread['coverage'] : null
+  const rawRanges = coverage !== null && Array.isArray(coverage['ranges']) ? coverage['ranges'] : []
+  const ranges: number[][] = rawRanges.filter((range): range is number[] =>
+    Array.isArray(range) && range.length === 2 && Number.isSafeInteger(range[0]) && Number.isSafeInteger(range[1]))
   return {
     ranges,
     // A thread with no coverage record cannot claim completeness.
-    historyComplete: coverage?.historyComplete === true,
-    textTruncated: coverage?.textTruncated === true,
+    historyComplete: coverage !== null && coverage['historyComplete'] === true,
+    textTruncated: coverage !== null && coverage['textTruncated'] === true,
   }
 }
 
-function formattedRanges(ranges) {
+function formattedRanges(ranges: readonly number[][]): string {
   if (ranges.length === 0) return '（没有可声明的事件序号区间）'
   return ranges.map(range => `[${range[0]}, ${range[1]}]`).join('、')
 }
@@ -166,15 +223,15 @@ function formattedRanges(ranges) {
  * unchanged revision is byte-stable. Sorting is stable, so rows that carry no
  * `sourceSeq` keep projection order relative to each other and land last.
  */
-function buildGroups(snapshot) {
-  const groups = []
-  const byKey = new Map()
+function buildGroups(snapshot: unknown): ExportGroup[] {
+  const groups: ExportGroup[] = []
+  const byKey = new Map<string, ExportGroup>()
   for (const thread of threadsOf(snapshot)) {
-    const dshSessionId = typeof thread.dshSessionId === 'string' && thread.dshSessionId !== '' ? thread.dshSessionId : null
-    const key = dshSessionId === null ? `thread:${String(thread.id ?? '')}` : `dsh:${dshSessionId}`
+    const dshSessionId = typeof thread['dshSessionId'] === 'string' && thread['dshSessionId'] !== '' ? thread['dshSessionId'] : null
+    const key = dshSessionId === null ? `thread:${String(thread['id'] ?? '')}` : `dsh:${dshSessionId}`
     let group = byKey.get(key)
     if (group === undefined) {
-      group = { key, threads: [], entries: [], title: '', dshSessionId: null }
+      group = { key, threads: [], entries: [], title: '', dshSessionId: null, coverage: { ranges: [], historyComplete: true, textTruncated: false } }
       byKey.set(key, group)
       groups.push(group)
     }
@@ -190,7 +247,7 @@ function buildGroups(snapshot) {
       if (a === b) return 0
       return a < b ? -1 : 1
     })
-    const ranges = []
+    const ranges: number[][] = []
     let historyComplete = true
     let textTruncated = false
     for (const thread of group.threads) {
@@ -204,40 +261,41 @@ function buildGroups(snapshot) {
   return groups
 }
 
-function processesOf(message) {
-  return (Array.isArray(message.process) ? message.process : []).filter(entry => entry && typeof entry === 'object')
+function processesOf(message: ProjectedRecord): ProjectedRecord[] {
+  const process = Array.isArray(message['process']) ? message['process'] : []
+  return process.filter(isObjectLike)
 }
 
-function renderProcessList(processes) {
-  const lines = []
+function renderProcessList(processes: readonly ProjectedRecord[]): string[] {
+  const lines: string[] = []
   for (const process of processes) {
-    const name = typeof process.name === 'string' && process.name !== '' ? process.name : '未命名工具'
-    const callId = typeof process.callId === 'string' && process.callId !== '' ? `（callId ${inlineCode(process.callId)}）` : ''
+    const name = typeof process['name'] === 'string' && process['name'] !== '' ? process['name'] : '未命名工具'
+    const callId = typeof process['callId'] === 'string' && process['callId'] !== '' ? `（callId ${inlineCode(process['callId'])}）` : ''
     lines.push(`- **${name}**${callId}`)
-    if (process.arguments !== undefined && process.arguments !== null) lines.push(`  - 参数：${clipInline(process.arguments)}`)
-    if (process.result !== undefined && process.result !== null) lines.push(`  - 结果：${clipInline(process.result)}`)
-    if (process.error !== undefined && process.error !== null) lines.push(`  - 错误：${clipInline(process.error)}`)
+    if (process['arguments'] !== undefined && process['arguments'] !== null) lines.push(`  - 参数：${clipInline(process['arguments'])}`)
+    if (process['result'] !== undefined && process['result'] !== null) lines.push(`  - 结果：${clipInline(process['result'])}`)
+    if (process['error'] !== undefined && process['error'] !== null) lines.push(`  - 错误：${clipInline(process['error'])}`)
   }
   return lines
 }
 
-function renderDetails(summary, lines) {
+function renderDetails(summary: string, lines: readonly string[]): string {
   return [`<details><summary>${summary}</summary>`, '', ...lines, '', '</details>'].join('\n')
 }
 
 /** One turn: the user question, its answers, then every tool record folded. */
-function renderTurnLines(turn, ordinal, maxBodyChars) {
+function renderTurnLines(turn: ExportTurn, ordinal: number, maxBodyChars: number): string[] {
   const { entry } = turn
-  const cardId = `${String(entry.thread.id ?? '')}:${entry.userQuestionSeq}`
+  const cardId = `${String(entry.thread['id'] ?? '')}:${entry.userQuestionSeq}`
   const lines = [`### 轮次 ${ordinal}（卡片 ${inlineCode(cardId)}）`, '']
-  lines.push('**问**', '', bodyBlock(entry.message.text, maxBodyChars), '')
+  lines.push('**问**', '', bodyBlock(entry.message['text'], maxBodyChars), '')
 
-  const processes = []
+  const processes: ProjectedRecord[] = []
   for (const item of turn.body) {
     if (item.kind === 'assistant') {
-      lines.push('**答**', '', bodyBlock(item.message.text, maxBodyChars), '')
+      lines.push('**答**', '', bodyBlock(item.message['text'], maxBodyChars), '')
     } else {
-      lines.push(`**${item.kind}**`, '', bodyBlock(item.message.text, maxBodyChars), '')
+      lines.push(`**${item.kind}**`, '', bodyBlock(item.message['text'], maxBodyChars), '')
     }
     processes.push(...processesOf(item.message))
   }
@@ -248,12 +306,12 @@ function renderTurnLines(turn, ordinal, maxBodyChars) {
   return lines
 }
 
-function renderGroupLines(group, index, maxBodyChars) {
+function renderGroupLines(group: ExportGroup, index: number, maxBodyChars: number): string[] {
   const lines = [`## 会话 ${index + 1}：${group.title}`, '']
   if (group.dshSessionId !== null) lines.push(`- 会话 ID：${inlineCode(group.dshSessionId)}`)
   else lines.push('- 会话 ID：（未关联 DSH 会话）')
   for (const thread of group.threads) {
-    lines.push(`- 线程：${inlineCode(String(thread.id ?? ''))}`)
+    lines.push(`- 线程：${inlineCode(String(thread['id'] ?? ''))}`)
   }
   lines.push('')
 
@@ -265,9 +323,9 @@ function renderGroupLines(group, index, maxBodyChars) {
     lines.push('')
   }
 
-  const turns = []
-  let current = null
-  const preamble = []
+  const turns: ExportTurn[] = []
+  let current: ExportTurn | null = null
+  const preamble: ExportEntry[] = []
   for (const entry of group.entries) {
     if (entry.kind === 'user') {
       current = { entry, body: [] }
@@ -281,7 +339,7 @@ function renderGroupLines(group, index, maxBodyChars) {
   if (preamble.length > 0) {
     lines.push('### 会话开始前的记录', '')
     for (const entry of preamble) {
-      lines.push(`**${entry.kind}**`, '', bodyBlock(entry.message.text, maxBodyChars), '')
+      lines.push(`**${entry.kind}**`, '', bodyBlock(entry.message['text'], maxBodyChars), '')
     }
   }
   turns.forEach((turn, ordinal) => {
@@ -291,15 +349,16 @@ function renderGroupLines(group, index, maxBodyChars) {
     lines.push('_（该会话没有已投影的消息。）_', '')
   }
 
-  const pending = group.threads.flatMap(thread => (Array.isArray(thread.pendingProcess) ? thread.pendingProcess : []))
-    .filter(entry => entry && typeof entry === 'object')
+  const pending = group.threads
+    .flatMap(thread => (Array.isArray(thread['pendingProcess']) ? thread['pendingProcess'] : []))
+    .filter(isObjectLike)
   if (pending.length > 0) {
     lines.push(renderDetails(`未完成的工具记录 ${pending.length} 条`, renderProcessList(pending)), '')
   }
   return lines
 }
 
-function renderMaterials(snapshot, maxBodyChars) {
+function renderMaterials(snapshot: unknown, maxBodyChars: number): string[] {
   const materials = listOf(snapshot, 'materials')
   const lines = [`## 材料（${materials.length} 项）`, '']
   if (materials.length === 0) {
@@ -307,16 +366,16 @@ function renderMaterials(snapshot, maxBodyChars) {
     return lines
   }
   materials.forEach((material, index) => {
-    const name = typeof material.name === 'string' && material.name.trim() !== '' ? oneLine(material.name) : `材料 ${index + 1}`
+    const name = typeof material['name'] === 'string' && material['name'].trim() !== '' ? oneLine(material['name']) : `材料 ${index + 1}`
     lines.push(`### ${index + 1}. ${name}`, '')
-    if (Number.isSafeInteger(material.bytes)) lines.push(`- 字节数：${material.bytes}`)
-    if (typeof material.importedAt === 'string' && material.importedAt !== '') lines.push(`- 导入时间：${inlineCode(material.importedAt)}`)
-    lines.push('', bodyBlock(material.text, maxBodyChars), '')
+    if (Number.isSafeInteger(material['bytes'])) lines.push(`- 字节数：${String(material['bytes'])}`)
+    if (typeof material['importedAt'] === 'string' && material['importedAt'] !== '') lines.push(`- 导入时间：${inlineCode(material['importedAt'])}`)
+    lines.push('', bodyBlock(material['text'], maxBodyChars), '')
   })
   return lines
 }
 
-function renderRegions(snapshot) {
+function renderRegions(snapshot: unknown): string[] {
   const regions = listOf(snapshot, 'regions')
   const lines = [`## 分区（${regions.length} 项）`, '']
   if (regions.length === 0) {
@@ -325,20 +384,22 @@ function renderRegions(snapshot) {
   }
   // Sizes are readable facts; the origin is intentionally not exported.
   for (const region of regions) {
-    const name = typeof region.name === 'string' && region.name !== '' ? oneLine(region.name) : inlineCode(String(region.id ?? ''))
-    const size = Number.isFinite(region.w) && Number.isFinite(region.h) ? `：${region.w}×${region.h}` : ''
+    const name = typeof region['name'] === 'string' && region['name'] !== '' ? oneLine(region['name']) : inlineCode(String(region['id'] ?? ''))
+    const w = region['w']
+    const h = region['h']
+    const size = typeof w === 'number' && Number.isFinite(w) && typeof h === 'number' && Number.isFinite(h) ? `：${w}×${h}` : ''
     lines.push(`- ${name}${size}`)
   }
   lines.push('')
   return lines
 }
 
-function renderAnnotations(snapshot) {
+function renderAnnotations(snapshot: unknown): string[] {
   const annotations = listOf(snapshot, 'annotations')
   const regions = listOf(snapshot, 'regions')
-  const regionNames = new Map()
+  const regionNames = new Map<string, string>()
   for (const region of regions) {
-    if (typeof region.id === 'string') regionNames.set(region.id, typeof region.name === 'string' && region.name !== '' ? oneLine(region.name) : region.id)
+    if (typeof region['id'] === 'string') regionNames.set(region['id'], typeof region['name'] === 'string' && region['name'] !== '' ? oneLine(region['name']) : region['id'])
   }
   const lines = [`## 批注（${annotations.length} 条）`, '']
   if (annotations.length === 0) {
@@ -346,12 +407,12 @@ function renderAnnotations(snapshot) {
     return lines
   }
   for (const annotation of annotations) {
-    const text = typeof annotation.text === 'string' ? annotation.text : ''
-    if (typeof annotation.targetCardId === 'string' && annotation.targetCardId !== '') {
-      lines.push(`- → 卡片 ${inlineCode(annotation.targetCardId)}：${text}`)
-    } else if (typeof annotation.targetRegionId === 'string' && annotation.targetRegionId !== '') {
-      const name = regionNames.get(annotation.targetRegionId)
-      lines.push(`- → 分区${name === undefined ? ` ${inlineCode(annotation.targetRegionId)}` : `「${name}」`}：${text}`)
+    const text = typeof annotation['text'] === 'string' ? annotation['text'] : ''
+    if (typeof annotation['targetCardId'] === 'string' && annotation['targetCardId'] !== '') {
+      lines.push(`- → 卡片 ${inlineCode(annotation['targetCardId'])}：${text}`)
+    } else if (typeof annotation['targetRegionId'] === 'string' && annotation['targetRegionId'] !== '') {
+      const name = regionNames.get(annotation['targetRegionId'])
+      lines.push(`- → 分区${name === undefined ? ` ${inlineCode(annotation['targetRegionId'])}` : `「${name}」`}：${text}`)
     } else {
       lines.push(`- → （未指定目标）：${text}`)
     }
@@ -363,19 +424,24 @@ function renderAnnotations(snapshot) {
 /**
  * Render a workspace snapshot as one Markdown document.
  *
- * @param {object} snapshot workspace snapshot (see the module header)
- * @param {{ maxBodyChars?: number }} [options]
- * @returns {string}
+ * @param snapshot workspace snapshot (see the module header)
+ * @param options `{ maxBodyChars }`
  */
-export function toMarkdown(snapshot, options = {}) {
-  const maxBodyChars = Number.isSafeInteger(options?.maxBodyChars) && options.maxBodyChars > 0
-    ? options.maxBodyChars
+export function toMarkdown(snapshot: unknown, options: MarkdownOptions = {}): string {
+  const limit = options?.maxBodyChars
+  const maxBodyChars = Number.isSafeInteger(limit) && (limit as number) > 0
+    ? (limit as number)
     : DEFAULT_MAX_BODY_CHARS
   const groups = buildGroups(snapshot)
-  const workspaceId = typeof snapshot?.workspaceId === 'string' && snapshot.workspaceId !== '' ? snapshot.workspaceId : '（未指定）'
-  const exportedAt = typeof snapshot?.exportedAt === 'string' && snapshot.exportedAt !== '' ? snapshot.exportedAt : '（未指定）'
-  const revision = Number.isSafeInteger(snapshot?.revision) ? String(snapshot.revision) : '（未指定）'
-  const schemaVersion = Number.isSafeInteger(snapshot?.schemaVersion) ? String(snapshot.schemaVersion) : '（未指定）'
+  const snapshotRecord = isPlainObject(snapshot) ? snapshot : null
+  const rawWorkspaceId = snapshotRecord?.['workspaceId']
+  const rawExportedAt = snapshotRecord?.['exportedAt']
+  const rawRevision = snapshotRecord?.['revision']
+  const rawSchemaVersion = snapshotRecord?.['schemaVersion']
+  const workspaceId = typeof rawWorkspaceId === 'string' && rawWorkspaceId !== '' ? rawWorkspaceId : '（未指定）'
+  const exportedAt = typeof rawExportedAt === 'string' && rawExportedAt !== '' ? rawExportedAt : '（未指定）'
+  const revision = Number.isSafeInteger(rawRevision) ? String(rawRevision) : '（未指定）'
+  const schemaVersion = Number.isSafeInteger(rawSchemaVersion) ? String(rawSchemaVersion) : '（未指定）'
 
   const lines = [
     '# Synapnova 导出快照',
@@ -427,10 +493,10 @@ const NUMERIC_AFTER_SIGN = /^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/
  * formula and gets quoted. Leading spaces are skipped for the decision but the
  * original text (including those spaces) is what ends up in the cell.
  *
- * @param {unknown} value raw cell value
- * @returns {boolean} true when the value must be quoted as text
+ * @param value raw cell value
+ * @returns true when the value must be quoted as text
  */
-export function needsFormulaGuard(value) {
+export function needsFormulaGuard(value: unknown): boolean {
   const text = value === null || value === undefined ? '' : String(value)
   let index = 0
   while (index < text.length && (text[index] === ' ' || text[index] === '\u00A0')) index += 1
@@ -442,14 +508,14 @@ export function needsFormulaGuard(value) {
 }
 
 /** RFC 4180 field escaping: quote when the field holds a quote, comma or break. */
-export function escapeCsvField(value) {
+export function escapeCsvField(value: unknown): string {
   const text = value === null || value === undefined ? '' : String(value)
   if (!/[",\r\n]/.test(text)) return text
   return `"${text.replaceAll('"', '""')}"`
 }
 
 /** One CSV cell: formula guard first, then RFC 4180 escaping. */
-export function csvCell(value) {
+export function csvCell(value: unknown): string {
   const text = value === null || value === undefined ? '' : String(value)
   return escapeCsvField(needsFormulaGuard(text) ? `'${text}` : text)
 }
@@ -462,24 +528,22 @@ export function csvCell(value) {
  * UTF-8 BOM so spreadsheet software detects UTF-8 without a manual import step,
  * uses CRLF row endings, and carries only already-projected text: no
  * credentials, no host paths, no layout data.
- *
- * @param {object} snapshot workspace snapshot (see the module header)
- * @returns {string}
  */
-export function toCsv(snapshot) {
+export function toCsv(snapshot: unknown): string {
   const rows = [CSV_HEADER.join(',')]
   for (const group of buildGroups(snapshot)) {
     for (const entry of group.entries) {
-      const source = typeof entry.thread.dshSessionId === 'string' && entry.thread.dshSessionId !== ''
-        ? entry.thread.dshSessionId
-        : (typeof entry.thread.id === 'string' ? entry.thread.id : '')
+      const dshSessionId = entry.thread['dshSessionId']
+      const source = typeof dshSessionId === 'string' && dshSessionId !== ''
+        ? dshSessionId
+        : (typeof entry.thread['id'] === 'string' ? entry.thread['id'] : '')
       rows.push([
         csvCell(group.title),
         csvCell(entry.seq === null ? '' : entry.seq),
         csvCell(entry.kind),
-        csvCell(typeof entry.message.at === 'string' ? entry.message.at : ''),
+        csvCell(typeof entry.message['at'] === 'string' ? entry.message['at'] : ''),
         csvCell(source),
-        csvCell(typeof entry.message.text === 'string' ? entry.message.text : ''),
+        csvCell(typeof entry.message['text'] === 'string' ? entry.message['text'] : ''),
       ].join(','))
     }
   }

@@ -1,4 +1,3 @@
-// @ts-nocheck -- TODO(types): 迁移自 dsh-synapnova@3fd1d00 canvas/tool-details.js，行为完整、类型标注待补。
 // 来源: dsh-synapnova@3fd1d00 canvas/tool-details.js
 
 /**
@@ -25,6 +24,9 @@
  * What is deliberately NOT read: `message.text`. A projected assistant message
  * may embed runtime-context/injected content that is not a tool record; treating
  * it as tool input would surface text the model never passed to a tool.
+ *
+ * 类型口径：输入是不受信的快照/模型，一律 `unknown` 进、经守卫收窄；输出是本模块
+ * 自己构造的冻结对象，用具名接口精确描述。
  */
 
 /** Fields reported for one tool call, in display order. */
@@ -39,24 +41,142 @@ export const TOOL_STATUS = Object.freeze({ done: 'done', error: 'error', pending
 /** Long outputs end with this marker when folded (the raw text is untouched). */
 export const TRUNCATION_SUFFIX = '…'
 
-function isPlainObject(value) {
+/** 工具调用状态。 */
+export type ToolStatus = 'done' | 'error' | 'pending'
+
+/** 一个详情字段的可用性。 */
+export interface DetailField<T> {
+  available: boolean;
+  value: T | null;
+  /** 仅在 `available === false` 时出现。 */
+  reason?: string;
+}
+
+/** 详情里出现的五个字段。 */
+export interface ToolDetailFields {
+  name: DetailField<string>;
+  input: DetailField<string>;
+  result: DetailField<string>;
+  status: DetailField<ToolStatus>;
+  at: DetailField<string>;
+}
+
+/** 一个工具调用的详情（冻结）。 */
+export interface ToolDetail {
+  sessionId: string;
+  sessionIdSource: string | null;
+  threadId: string | null;
+  turnIndex: number;
+  callId: string;
+  name: string | null;
+  input: string | null;
+  result: string | null;
+  status: ToolStatus | null;
+  at: string | null;
+  pending: boolean;
+  fields: ToolDetailFields;
+  unavailable: string[];
+  error: string | null;
+  hostTurn: number | null;
+  hostStep: number | null;
+}
+
+/** 被跳过的记录（无法定键）。 */
+export interface SkippedToolRecord {
+  reason: string;
+  sessionId?: string;
+  turnIndex?: number;
+}
+
+/** 同一键的重复记录。 */
+export interface ConflictingToolRecord {
+  sessionId: string;
+  turnIndex: number;
+  callId: string;
+}
+
+/** `indexToolCalls` 的产物。 */
+export interface ToolCallIndex {
+  entries: Map<string, ToolDetail>;
+  skipped: SkippedToolRecord[];
+  conflicts: ConflictingToolRecord[];
+}
+
+/** 查找入参：三部分缺一不可，可选传现成索引。 */
+export interface ToolLookup {
+  sessionId?: unknown;
+  turnIndex?: unknown;
+  callId?: unknown;
+  index?: ToolCallIndex;
+}
+
+/** 查找结果：命中或未命中都有一个判别字段 `found`。 */
+export type ToolLookupResult =
+  | {
+      found: true;
+      reason: null;
+      missing: string[];
+      sessionId: string;
+      turnIndex: number;
+      callId: string;
+      name: string | null;
+      input: string | null;
+      result: string | null;
+      status: ToolStatus | null;
+      at: string | null;
+      pending: boolean;
+      fields: ToolDetailFields;
+      unavailable: string[];
+      error: string | null;
+      hostTurn: number | null;
+      hostStep: number | null;
+      sessionIdSource: string | null;
+      threadId: string | null;
+    }
+  | {
+      found: false;
+      reason: 'incomplete-lookup' | 'not-found';
+      missing: string[];
+      sessionId: unknown;
+      turnIndex: unknown;
+      callId: unknown;
+    };
+
+/** `summarizeLongOutput` 的产物。 */
+export interface FoldedOutput {
+  preview: string;
+  truncated: boolean;
+  totalChars: number;
+}
+
+/** 线程边界：一个 user 轮在 messages 里的下标区间。 */
+interface TurnBoundary {
+  turnIndex: number;
+  start: number;
+  end: number;
+}
+
+/** 一条工具记录（形状不受信，只按需读取）。 */
+type ToolRecord = Record<string, unknown>;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function deepFreeze(value) {
+function deepFreeze<T>(value: T): T {
   if (Array.isArray(value)) {
     for (const item of value) deepFreeze(item)
-    return Object.freeze(value)
+    return Object.freeze(value) as unknown as T
   }
   if (isPlainObject(value)) {
     for (const key of Object.keys(value)) deepFreeze(value[key])
-    return Object.freeze(value)
+    return Object.freeze(value) as unknown as T
   }
   return value
 }
 
-function messagesOf(thread) {
-  return Array.isArray(thread?.messages) ? thread.messages : []
+function messagesOf(thread: unknown): unknown[] {
+  return isPlainObject(thread) && Array.isArray(thread['messages']) ? thread['messages'] : []
 }
 
 /**
@@ -67,18 +187,25 @@ function messagesOf(thread) {
  * entries that still carry `messages` can yield tool records; a summary without
  * messages simply contributes nothing (never a guessed value).
  */
-function threadsOf(model) {
+function threadsOf(model: unknown): unknown[] {
   if (!isPlainObject(model)) return []
-  if (Array.isArray(model.projection?.threads)) return model.projection.threads
-  if (Array.isArray(model.threads)) return model.threads
+  const projection = model['projection']
+  if (isPlainObject(projection) && Array.isArray(projection['threads'])) return projection['threads']
+  if (Array.isArray(model['threads'])) return model['threads']
   return []
 }
 
-function sessionKeyOf(thread) {
-  if (typeof thread?.dshSessionId === 'string' && thread.dshSessionId !== '') {
-    return { sessionId: thread.dshSessionId, source: 'dshSessionId' }
+/** 会话键：优先 DSH 会话 id，其次线程 id。 */
+interface SessionKey {
+  sessionId: string | null;
+  source: string | null;
+}
+
+function sessionKeyOf(thread: unknown): SessionKey {
+  if (isPlainObject(thread) && typeof thread['dshSessionId'] === 'string' && thread['dshSessionId'] !== '') {
+    return { sessionId: thread['dshSessionId'], source: 'dshSessionId' }
   }
-  if (typeof thread?.id === 'string' && thread.id !== '') return { sessionId: thread.id, source: 'threadId' }
+  if (isPlainObject(thread) && typeof thread['id'] === 'string' && thread['id'] !== '') return { sessionId: thread['id'], source: 'threadId' }
   return { sessionId: null, source: null }
 }
 
@@ -87,38 +214,44 @@ function sessionKeyOf(thread) {
  * `userQuestionSeq`: projection order, 0-based, injected/non-user messages never
  * consume an ordinal.
  */
-function turnBoundaries(thread) {
-  const turns = []
+function turnBoundaries(thread: unknown): TurnBoundary[] {
+  const turns: TurnBoundary[] = []
   const messages = messagesOf(thread)
   for (let index = 0; index < messages.length; index++) {
-    if (messages[index]?.kind !== 'user') continue
-    turns.push({ turnIndex: turns.length, start: index })
+    const message = messages[index]
+    if (!isPlainObject(message) || message['kind'] !== 'user') continue
+    turns.push({ turnIndex: turns.length, start: index, end: messages.length })
   }
+  // `end` 在构造时先占位、这里统一覆盖为最终值（相邻 user 轮的起点，末轮取
+  // 消息总数）——对外读到的 `end` 与旧版逐字一致，只是把两趟循环的字段填充
+  // 顺序写进了类型。
   for (let index = 0; index < turns.length; index++) {
-    turns[index].end = index + 1 < turns.length ? turns[index + 1].start : messages.length
+    const current = turns[index] as TurnBoundary
+    const next = turns[index + 1]
+    current.end = next === undefined ? messages.length : next.start
   }
   return turns
 }
 
 /** `pending` when the call has no result yet, `error` when it failed, else `done`. */
-export function toolStatus(entry) {
+export function toolStatus(entry: unknown): ToolStatus | null {
   if (!isPlainObject(entry)) return null
-  if (entry.error !== null && entry.error !== undefined && entry.error !== '') return TOOL_STATUS.error
-  if (entry.result === null || entry.result === undefined) return TOOL_STATUS.pending
+  if (entry['error'] !== null && entry['error'] !== undefined && entry['error'] !== '') return TOOL_STATUS.error
+  if (entry['result'] === null || entry['result'] === undefined) return TOOL_STATUS.pending
   return TOOL_STATUS.done
 }
 
-function entryAt(entry) {
-  if (typeof entry?.at === 'string') return entry.at
+function entryAt(entry: unknown): string | null {
+  if (isPlainObject(entry) && typeof entry['at'] === 'string') return entry['at']
   return null
 }
 
-function callIdOf(entry) {
-  if (typeof entry?.callId === 'string' && entry.callId !== '') return entry.callId
+function callIdOf(entry: unknown): string | null {
+  if (isPlainObject(entry) && typeof entry['callId'] === 'string' && entry['callId'] !== '') return entry['callId']
   return null
 }
 
-function indexKey(sessionId, turnIndex, callId) {
+function indexKey(sessionId: string, turnIndex: number, callId: string): string {
   // A JSON tuple, not a delimiter join: session ids and call ids are opaque and
   // may themselves contain any delimiter we could pick.
   return JSON.stringify([sessionId, turnIndex, callId])
@@ -131,7 +264,7 @@ function indexKey(sessionId, turnIndex, callId) {
  * duplicating the key format, and so a wrong key can never be silently spelled
  * differently in two places.
  */
-export function toolIndexKey(sessionId, turnIndex, callId) {
+export function toolIndexKey(sessionId: string, turnIndex: number, callId: string): string {
   return indexKey(sessionId, turnIndex, callId)
 }
 
@@ -146,10 +279,10 @@ export function toolIndexKey(sessionId, turnIndex, callId) {
  * Records with an empty/missing `callId` are counted in `skipped` instead of
  * being keyed under `''`, which would collide across every unnamed call.
  */
-export function indexToolCalls(model) {
-  const entries = new Map()
-  const skipped = []
-  const conflicts = []
+export function indexToolCalls(model: unknown): ToolCallIndex {
+  const entries = new Map<string, ToolDetail>()
+  const skipped: SkippedToolRecord[] = []
+  const conflicts: ConflictingToolRecord[] = []
   for (const thread of threadsOf(model)) {
     const { sessionId, source } = sessionKeyOf(thread)
     if (sessionId === null) {
@@ -158,11 +291,12 @@ export function indexToolCalls(model) {
     }
     const turns = turnBoundaries(thread)
     const messages = messagesOf(thread)
+    const threadId = isPlainObject(thread) && typeof thread['id'] === 'string' ? thread['id'] : null
     for (const turn of turns) {
       for (let index = turn.start; index < turn.end; index++) {
         const message = messages[index]
-        if (!Array.isArray(message?.process)) continue
-        for (const record of message.process) {
+        if (!isPlainObject(message) || !Array.isArray(message['process'])) continue
+        for (const record of message['process'] as unknown[]) {
           const callId = callIdOf(record)
           if (callId === null) {
             skipped.push({ reason: 'no-call-id', sessionId, turnIndex: turn.turnIndex })
@@ -172,11 +306,11 @@ export function indexToolCalls(model) {
           const detail = buildDetail({
             sessionId,
             sessionIdSource: source,
-            threadId: typeof thread.id === 'string' ? thread.id : null,
+            threadId,
             turnIndex: turn.turnIndex,
             callId,
-            record,
-            at: entryAt(record) ?? (typeof message.at === 'string' ? message.at : null),
+            record: isPlainObject(record) ? record : {},
+            at: entryAt(record) ?? (typeof message['at'] === 'string' ? message['at'] : null),
             pending: false,
           })
           if (entries.has(key)) {
@@ -189,9 +323,11 @@ export function indexToolCalls(model) {
     }
     // Thread-level pending records belong to the newest user turn: that is the
     // only turn that can still be running.
-    const pendingProcess = Array.isArray(thread.pendingProcess) ? thread.pendingProcess : []
+    const rawPendingProcess = isPlainObject(thread) && Array.isArray(thread['pendingProcess']) ? thread['pendingProcess'] : []
+    const pendingProcess = rawPendingProcess as unknown[]
     if (pendingProcess.length > 0 && turns.length > 0) {
-      const turn = turns[turns.length - 1]
+      // `turns.length > 0` 已保证末项存在。
+      const turn = turns[turns.length - 1] as TurnBoundary
       for (const record of pendingProcess) {
         const callId = callIdOf(record)
         if (callId === null) {
@@ -203,10 +339,10 @@ export function indexToolCalls(model) {
         entries.set(key, buildDetail({
           sessionId,
           sessionIdSource: source,
-          threadId: typeof thread.id === 'string' ? thread.id : null,
+          threadId,
           turnIndex: turn.turnIndex,
           callId,
-          record,
+          record: isPlainObject(record) ? record : {},
           at: entryAt(record),
           pending: true,
         }))
@@ -216,18 +352,30 @@ export function indexToolCalls(model) {
   return { entries, skipped, conflicts }
 }
 
-function field(value, reason) {
+function field<T>(value: T | null | undefined, reason?: string): DetailField<T> {
   return value === null || value === undefined
     ? { available: false, value: null, reason: reason ?? 'not-projected' }
     : { available: true, value }
 }
 
-function buildDetail({ sessionId, sessionIdSource, threadId, turnIndex, callId, record, at, pending }) {
-  const name = typeof record.name === 'string' && record.name !== '' ? record.name : null
-  const input = typeof record.arguments === 'string' ? record.arguments : null
-  const result = typeof record.result === 'string' ? record.result : null
+/** `buildDetail` 的入参。 */
+interface BuildDetailInput {
+  sessionId: string;
+  sessionIdSource: string | null;
+  threadId: string | null;
+  turnIndex: number;
+  callId: string;
+  record: ToolRecord;
+  at: string | null;
+  pending: boolean;
+}
+
+function buildDetail({ sessionId, sessionIdSource, threadId, turnIndex, callId, record, at, pending }: BuildDetailInput): ToolDetail {
+  const name = typeof record['name'] === 'string' && record['name'] !== '' ? record['name'] : null
+  const input = typeof record['arguments'] === 'string' ? record['arguments'] : null
+  const result = typeof record['result'] === 'string' ? record['result'] : null
   const status = toolStatus(record)
-  const fields = {
+  const fields: ToolDetailFields = {
     name: field(name, 'not-projected'),
     input: field(input, 'not-projected'),
     // `result === null` means the call has not returned yet (whether the record
@@ -237,7 +385,7 @@ function buildDetail({ sessionId, sessionIdSource, threadId, turnIndex, callId, 
     status: field(status, 'not-projected'),
     at: field(at, 'no-timestamp'),
   }
-  const unavailable = TOOL_DETAIL_FIELDS.filter(key => fields[key].available === false)
+  const unavailable = TOOL_DETAIL_FIELDS.filter(key => (fields[key as keyof ToolDetailFields]).available === false)
   return deepFreeze({
     sessionId,
     sessionIdSource,
@@ -253,10 +401,10 @@ function buildDetail({ sessionId, sessionIdSource, threadId, turnIndex, callId, 
     fields,
     unavailable,
     // `error` is kept separate from `result` on purpose: a failed call and a
-    // call that returned the string "error" must stay distinguishable.
-    error: typeof record.error === 'string' ? record.error : null,
-    hostTurn: Number.isSafeInteger(record.turn) ? record.turn : null,
-    hostStep: Number.isSafeInteger(record.step) ? record.step : null,
+    // call that returned the string "error" must never be conflated.
+    error: typeof record['error'] === 'string' ? record['error'] : null,
+    hostTurn: Number.isSafeInteger(record['turn']) ? (record['turn'] as number) : null,
+    hostStep: Number.isSafeInteger(record['step']) ? (record['step'] as number) : null,
   })
 }
 
@@ -266,17 +414,17 @@ function buildDetail({ sessionId, sessionIdSource, threadId, turnIndex, callId, 
  * The lookup never falls back to "any session with this callId": all three key
  * parts must match, which is what makes AC-10a hold.
  */
-export function toolDetailFor(model, lookup = {}) {
+export function toolDetailFor(model: unknown, lookup: ToolLookup = {}): ToolLookupResult {
   const { sessionId, turnIndex, callId } = lookup
-  const missing = []
+  const missing: string[] = []
   if (typeof sessionId !== 'string' || sessionId === '') missing.push('sessionId')
-  if (!Number.isSafeInteger(turnIndex) || turnIndex < 0) missing.push('turnIndex')
+  if (!Number.isSafeInteger(turnIndex) || (turnIndex as number) < 0) missing.push('turnIndex')
   if (typeof callId !== 'string' || callId === '') missing.push('callId')
   if (missing.length > 0) {
     return deepFreeze({ found: false, reason: 'incomplete-lookup', missing, sessionId: sessionId ?? null, turnIndex: turnIndex ?? null, callId: callId ?? null })
   }
   const index = lookup.index ?? indexToolCalls(model)
-  const detail = index.entries.get(indexKey(sessionId, turnIndex, callId))
+  const detail = index.entries.get(indexKey(sessionId as string, turnIndex as number, callId as string))
   if (detail === undefined) {
     return deepFreeze({ found: false, reason: 'not-found', missing: [], sessionId, turnIndex, callId })
   }
@@ -292,12 +440,13 @@ export function toolDetailFor(model, lookup = {}) {
  *
  * The cut never splits a surrogate pair, so `preview` stays valid UTF-16.
  */
-export function summarizeLongOutput(text, limit = DEFAULT_OUTPUT_LIMIT) {
+export function summarizeLongOutput(text: unknown, limit: unknown = DEFAULT_OUTPUT_LIMIT): FoldedOutput {
   if (typeof text !== 'string') throw new TypeError('summarizeLongOutput 需要字符串')
-  if (!Number.isSafeInteger(limit) || limit < 0) throw new TypeError('limit 必须是非负安全整数')
+  if (!Number.isSafeInteger(limit) || (limit as number) < 0) throw new TypeError('limit 必须是非负安全整数')
+  const budget = limit as number
   const totalChars = text.length
-  if (totalChars <= limit) return { preview: text, truncated: false, totalChars }
-  let cut = limit
+  if (totalChars <= budget) return { preview: text, truncated: false, totalChars }
+  let cut = budget
   // A high surrogate at the boundary means the pair would be split; back off by
   // one so the preview does not end with a lone surrogate.
   const code = text.charCodeAt(cut - 1)
@@ -311,11 +460,11 @@ export function summarizeLongOutput(text, limit = DEFAULT_OUTPUT_LIMIT) {
  * Convenience for the detail panel: it uses the same index, so the panel and a
  * single lookup can never disagree.
  */
-export function toolCallsForTurn(model, { sessionId, turnIndex } = {}) {
+export function toolCallsForTurn(model: unknown, { sessionId, turnIndex }: { sessionId?: unknown; turnIndex?: unknown } = {}): ToolDetail[] {
   if (typeof sessionId !== 'string' || sessionId === '') return []
-  if (!Number.isSafeInteger(turnIndex) || turnIndex < 0) return []
+  if (!Number.isSafeInteger(turnIndex) || (turnIndex as number) < 0) return []
   const index = indexToolCalls(model)
-  const list = []
+  const list: ToolDetail[] = []
   for (const detail of index.entries.values()) {
     if (detail.sessionId === sessionId && detail.turnIndex === turnIndex) list.push(detail)
   }

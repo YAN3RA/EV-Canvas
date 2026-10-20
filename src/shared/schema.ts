@@ -43,21 +43,11 @@ export const MAX_PROJECTION_LENGTH = 8_000
 export const PROJECTION_TRUNCATED_SUFFIX = '\n——…（详情查看全文）'
 export const TOPIC_COLORS = ['#0f766e', '#2563eb', '#be123c', '#7c3aed', '#b45309']
 
-export class InputError extends Error {}
-export class NotFoundError extends Error {}
-export class RevisionConflictError extends Error {
-  constructor(currentRevision, message = '工作区已更新，请重新预览后重试') {
-    super(message)
-    this.currentRevision = currentRevision
-    this.code = 'REVISION_CONFLICT'
-  }
-}
-export class IdempotencyExpiredError extends RevisionConflictError {
-  constructor(currentRevision) {
-    super(currentRevision, 'operationId 已超出幂等窗口，请重新预览并生成新 ID')
-    this.code = 'IDEMPOTENCY_EXPIRED'
-  }
-}
+// 错误类不在此定义：从 errors.ts 重导出，保证全仓库只有一套类，
+// `instanceof` 才能跨模块成立（历史教训：两套同名类让「store 抛 NotFoundError
+// → 路由映射 404」静默退化成 500）。
+export { InputError, NotFoundError, RevisionConflictError, IdempotencyExpiredError } from './errors'
+import { IdempotencyExpiredError, InputError, NotFoundError, RevisionConflictError } from './errors'
 export const IDEMPOTENCY_LIMIT = 200
 export const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 

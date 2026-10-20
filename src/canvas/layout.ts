@@ -1,4 +1,3 @@
-// @ts-nocheck -- TODO(types): 迁移自 dsh-synapnova@3fd1d00 canvas/layout.js，行为完整、类型标注待补。
 // 来源: dsh-synapnova@3fd1d00 canvas/layout.js
 
 /**
@@ -32,6 +31,7 @@
  */
 
 import { NATURAL_ORIGIN, NATURAL_STEP_X } from '@/canvas/model'
+import type { Position } from '@/canvas/model'
 
 /** Card box, mirrored from app.js. Provisional until measured in the DOM. */
 export const CARD_WIDTH = 310
@@ -72,15 +72,71 @@ export const LAYOUT_PATCH_AREA = 'layoutCards'
  */
 export const LAYOUT_COMMAND_KIND = 'layout'
 
-function isPlainObject(value) {
+/**
+ * 布局引擎接受的模型形状。
+ *
+ * 只声明本模块真正读取的字段，且全部按 `unknown` 收窄：引擎同样接受测试里
+ * 手工拼出的 duck-typed 模型（没有 `cardsById` / `layoutCards` 也合法）。
+ */
+export interface LayoutModelInput {
+  cards?: readonly unknown[]
+  cardsById?: Readonly<Record<string, unknown>>
+  layoutCards?: Readonly<Record<string, unknown>>
+}
+
+/** 引擎选项。`origin` 缺省时回落到 `NATURAL_ORIGIN`。 */
+export interface LayoutOptions {
+  origin?: unknown
+  /** `layoutToCommandIntent` 的补丁落点，缺省 `LAYOUT_PATCH_AREA`。 */
+  area?: string
+  /** `layoutToCommandIntent` 的意图 kind，缺省 `LAYOUT_COMMAND_KIND`。 */
+  kind?: string
+}
+
+/** 一张参与布局的卡片（只读 `id` / `parentId` / `position` / `naturalPosition`）。 */
+interface LayoutCard {
+  id: string;
+  [field: string]: unknown;
+}
+
+/** 一条布局补丁：`before` 为 null 表示「从未手工放置过」。 */
+export interface LayoutPatch {
+  area: string;
+  id: string;
+  before: Position | null;
+  after: Position;
+}
+
+/** 一次布局的产物：新坐标、真正移动的张数、血缘不可信的卡片 id。 */
+export interface LayoutResult {
+  positions: Record<string, Position>;
+  movedCount: number;
+  unresolved: string[];
+}
+
+/** 批量布局发出的命令意图。 */
+export interface LayoutIntent {
+  kind: string;
+  patches: LayoutPatch[];
+}
+
+/** `layoutIntent` 的产物：意图 + 引擎结果。 */
+export interface LayoutIntentWithResult extends LayoutIntent {
+  layout: LayoutResult;
+}
+
+/** 一个引擎。 */
+export type LayoutEngine = (model: LayoutModelInput | null | undefined, options?: LayoutOptions) => LayoutResult;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function finiteNumber(value) {
+function finiteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
-function readPosition(value) {
+function readPosition(value: unknown): Position | null {
   if (!isPlainObject(value) || !finiteNumber(value.x) || !finiteNumber(value.y)) return null
   return { x: value.x, y: value.y }
 }
@@ -92,21 +148,22 @@ function readPosition(value) {
  * (`model.unmatchedCardIds`, e.g. material nodes) have no card and therefore get
  * no position here — they keep their coordinates untouched in `layoutCards`.
  */
-function cardsOf(model) {
-  const cards = []
-  const byId = new Map()
+function cardsOf(model: LayoutModelInput | null | undefined): { cards: LayoutCard[]; byId: Map<string, LayoutCard> } {
+  const cards: LayoutCard[] = []
+  const byId = new Map<string, LayoutCard>()
   if (!Array.isArray(model?.cards)) return { cards, byId }
   for (const card of model.cards) {
     if (!isPlainObject(card) || typeof card.id !== 'string' || card.id === '') continue
     if (byId.has(card.id)) continue
-    cards.push(card)
-    byId.set(card.id, card)
+    const typed = card as unknown as LayoutCard
+    cards.push(typed)
+    byId.set(typed.id, typed)
   }
   return { cards, byId }
 }
 
 /** Parent card, or null for a root, a broken link, or a self-reference. */
-function parentOf(card, byId) {
+function parentOf(card: LayoutCard, byId: Map<string, LayoutCard>): LayoutCard | null {
   const parentId = card?.parentId
   if (typeof parentId !== 'string' || parentId === '') return null
   if (parentId === card.id) return null
@@ -114,7 +171,7 @@ function parentOf(card, byId) {
 }
 
 /** Position a card is currently DRAWN at: manual position first, natural else. */
-function drawnPosition(card) {
+function drawnPosition(card: LayoutCard): Position {
   return readPosition(card?.position) ?? readPosition(card?.naturalPosition) ?? { ...NATURAL_ORIGIN }
 }
 
@@ -124,8 +181,11 @@ function drawnPosition(card) {
  * Never falls back to `naturalPosition`: a card that was never placed must be
  * patched with `before: null`, exactly like `commands.moveCard` does.
  */
-function storedPosition(model, cardId) {
-  const fromCard = readPosition(model?.cardsById?.[cardId]?.position)
+function storedPosition(model: LayoutModelInput | null | undefined, cardId: string): Position | null {
+  // 逐字保留 `model?.cardsById?.[cardId]?.position` 的可选访问链：形状不对时
+  // `readPosition` 本来就会返回 null，这里只是让类型系统看到同一件事。
+  const card = model?.cardsById?.[cardId]
+  const fromCard = readPosition(isPlainObject(card) ? card.position : null)
   if (fromCard !== null) return fromCard
   return readPosition(model?.layoutCards?.[cardId])
 }
@@ -139,22 +199,25 @@ function storedPosition(model, cardId) {
  * from the topmost collected node downward, so a shared ancestor is resolved
  * once and every descendant reuses it (O(n) for a tree).
  */
-function resolveDepths(cards, byId) {
-  const depth = new Map()
-  const cycle = new Set()
+function resolveDepths(cards: readonly LayoutCard[], byId: Map<string, LayoutCard>): { depth: Map<string, number>; cycle: Set<string> } {
+  const depth = new Map<string, number>()
+  const cycle = new Set<string>()
   for (const card of cards) {
     if (depth.has(card.id)) continue
-    const path = []
-    const seen = new Map()
-    let cursor = card
+    const path: LayoutCard[] = []
+    const seen = new Map<string, number>()
+    let cursor: LayoutCard | null = card
     let base = 0
     while (cursor !== null) {
       if (depth.has(cursor.id)) {
-        base = depth.get(cursor.id) + 1
+        // `has()` 已保证存在；断言只补类型，判定的仍是同一个值。
+        base = (depth.get(cursor.id) as number) + 1
         break
       }
       if (seen.has(cursor.id)) {
-        for (let index = seen.get(cursor.id); index < path.length; index++) cycle.add(path[index].id)
+        // 同上：`has()` 为真，因此 `get()` 必为 number。
+        const start = seen.get(cursor.id) as number
+        for (let index = start; index < path.length; index++) cycle.add((path[index] as LayoutCard).id)
         base = 0
         break
       }
@@ -163,7 +226,8 @@ function resolveDepths(cards, byId) {
       cursor = parentOf(cursor, byId)
     }
     for (let index = path.length - 1, step = 0; index >= 0; index--, step++) {
-      depth.set(path[index].id, base + step)
+      // 循环条件保证 index 在 [0, path.length) 内。
+      depth.set((path[index] as LayoutCard).id, base + step)
     }
   }
   return { depth, cycle }
@@ -177,21 +241,23 @@ function resolveDepths(cards, byId) {
  * deterministic regardless of map iteration. Lanes are what keeps two unrelated
  * branches from being drawn on top of each other.
  */
-function resolveLanes(cards, byId) {
-  const parent = new Map()
+function resolveLanes(cards: readonly LayoutCard[], byId: Map<string, LayoutCard>): { laneOf: Map<string, number>; laneCount: number } {
+  const parent = new Map<string, string>()
   for (const card of cards) parent.set(card.id, card.id)
-  const find = id => {
+  // `parent` 预先为每张卡填入自指，`union` 只改写已存在的键，所以每次 `get`
+  // 都命中；断言只补类型，不插入任何兜底值（兜底会掩盖真正的断链）。
+  const find = (id: string): string => {
     let root = id
-    while (parent.get(root) !== root) root = parent.get(root)
+    while (parent.get(root) !== root) root = parent.get(root) as string
     let cursor = id
     while (parent.get(cursor) !== root) {
-      const next = parent.get(cursor)
+      const next = parent.get(cursor) as string
       parent.set(cursor, root)
       cursor = next
     }
     return root
   }
-  const union = (a, b) => {
+  const union = (a: string, b: string): void => {
     const rootA = find(a)
     const rootB = find(b)
     if (rootA !== rootB) parent.set(rootB, rootA)
@@ -200,33 +266,47 @@ function resolveLanes(cards, byId) {
     const node = parentOf(card, byId)
     if (node !== null) union(card.id, node.id)
   }
-  const laneByRoot = new Map()
-  const laneOf = new Map()
+  const laneByRoot = new Map<string, number>()
+  const laneOf = new Map<string, number>()
   for (const card of cards) {
     const root = find(card.id)
-    if (!laneByRoot.has(root)) laneByRoot.set(root, laneByRoot.size)
-    laneOf.set(card.id, laneByRoot.get(root))
+    let lane = laneByRoot.get(root)
+    if (lane === undefined) {
+      lane = laneByRoot.size
+      laneByRoot.set(root, lane)
+    }
+    laneOf.set(card.id, lane)
   }
   return { laneOf, laneCount: laneByRoot.size }
 }
 
+/** 一次布局分析的结果。 */
+interface LayoutAnalysis {
+  cards: LayoutCard[];
+  byId: Map<string, LayoutCard>;
+  depth: Map<string, number>;
+  laneOf: Map<string, number>;
+  laneCount: number;
+  unresolved: string[];
+}
+
 /** Shared analysis: depths, lanes, and the cards whose lineage is untrustworthy. */
-function analyze(model) {
+function analyze(model: LayoutModelInput | null | undefined): LayoutAnalysis {
   const { cards, byId } = cardsOf(model)
   const { depth, cycle } = resolveDepths(cards, byId)
   const { laneOf, laneCount } = resolveLanes(cards, byId)
-  const broken = new Set()
+  const broken = new Set<string>()
   for (const card of cards) {
     const parentId = card.parentId
     if (typeof parentId !== 'string' || parentId === '') continue
     if (parentId === card.id || !byId.has(parentId)) broken.add(card.id)
   }
-  const unresolved = []
+  const unresolved: string[] = []
   for (const card of cards) if (broken.has(card.id) || cycle.has(card.id)) unresolved.push(card.id)
   return { cards, byId, depth, laneOf, laneCount, unresolved }
 }
 
-function readOrigin(origin) {
+function readOrigin(origin: unknown): Position {
   const value = readPosition(origin)
   return value === null ? { x: NATURAL_ORIGIN.x, y: NATURAL_ORIGIN.y } : value
 }
@@ -237,7 +317,7 @@ function readOrigin(origin) {
  * `movedCount` is not "cards in the result": a layout that reproduces the current
  * picture reports 0, which is what lets the caller skip an empty undo step.
  */
-function finish(model, positions, unresolved) {
+function finish(model: LayoutModelInput | null | undefined, positions: Record<string, Position>, unresolved: string[]): LayoutResult {
   const { cards } = cardsOf(model)
   let movedCount = 0
   for (const card of cards) {
@@ -257,11 +337,11 @@ function finish(model, positions, unresolved) {
  * overlap and no card is dropped. `horizontal` puts depth on X and the stack on
  * Y; `vertical` swaps the two axes.
  */
-function gridPositions(analysis, orientation, origin) {
+function gridPositions(analysis: LayoutAnalysis, orientation: 'horizontal' | 'vertical', origin: Position): Record<string, Position> {
   const { cards, depth, laneOf, laneCount } = analysis
-  const cellCount = new Map()
-  const cellOf = new Map()
-  const laneSize = new Array(laneCount).fill(1)
+  const cellCount = new Map<string, number>()
+  const cellOf = new Map<string, { lane: number; level: number; stack: number }>()
+  const laneSize = new Array<number>(laneCount).fill(1)
   for (const card of cards) {
     const lane = laneOf.get(card.id) ?? 0
     const level = depth.get(card.id) ?? 0
@@ -269,19 +349,22 @@ function gridPositions(analysis, orientation, origin) {
     const stack = cellCount.get(key) ?? 0
     cellCount.set(key, stack + 1)
     cellOf.set(card.id, { lane, level, stack })
-    if (stack + 1 > laneSize[lane]) laneSize[lane] = stack + 1
+    // `lane` 由 `resolveLanes` 生成，必然落在 [0, laneCount) 内。
+    if (stack + 1 > (laneSize[lane] as number)) laneSize[lane] = stack + 1
   }
-  const laneBase = []
+  const laneBase: number[] = []
   let cursor = 0
   for (let lane = 0; lane < laneCount; lane++) {
     laneBase.push(cursor)
-    cursor += laneSize[lane]
+    // 上面刚 push 过，同一下标必有值。
+    cursor += laneSize[lane] as number
   }
-  const positions = {}
+  const positions: Record<string, Position> = {}
   for (const card of cards) {
     const cell = cellOf.get(card.id)
     if (cell === undefined) continue
-    const slot = laneBase[cell.lane] + cell.stack
+    // `laneBase` 与 `laneSize` 长度同为 `laneCount`，`cell.lane` 必在其中。
+    const slot = (laneBase[cell.lane] as number) + cell.stack
     positions[card.id] = orientation === 'horizontal'
       ? { x: Math.round(origin.x + cell.level * CARD_STEP_X), y: Math.round(origin.y + slot * CARD_STEP_Y) }
       : { x: Math.round(origin.x + slot * CARD_STEP_LANE), y: Math.round(origin.y + cell.level * CARD_STEP_Y) }
@@ -296,7 +379,7 @@ function gridPositions(analysis, orientation, origin) {
  * its own row band. Cards that branch at the same depth stack downward inside
  * their band instead of overlapping.
  */
-export function layoutHorizontal(model, options = {}) {
+export function layoutHorizontal(model: LayoutModelInput | null | undefined, options: LayoutOptions = {}): LayoutResult {
   const analysis = analyze(model)
   const origin = readOrigin(options.origin)
   return finish(model, gridPositions(analysis, 'horizontal', origin), analysis.unresolved)
@@ -308,7 +391,7 @@ export function layoutHorizontal(model, options = {}) {
  * Depth is a row (`+CARD_STEP_Y` per generation); each lineage component gets its
  * own column band, and same-depth branches stack to the right inside that band.
  */
-export function layoutVertical(model, options = {}) {
+export function layoutVertical(model: LayoutModelInput | null | undefined, options: LayoutOptions = {}): LayoutResult {
   const analysis = analyze(model)
   const origin = readOrigin(options.origin)
   return finish(model, gridPositions(analysis, 'vertical', origin), analysis.unresolved)
@@ -322,25 +405,28 @@ export function layoutVertical(model, options = {}) {
  * two branches are always visually separated by a full row pitch. Cycles and
  * broken links stay in their own lane and are reported in `unresolved`.
  */
-export function layoutByBranch(model, options = {}) {
+export function layoutByBranch(model: LayoutModelInput | null | undefined, options: LayoutOptions = {}): LayoutResult {
   const analysis = analyze(model)
   const origin = readOrigin(options.origin)
   const { cards, depth, laneOf, laneCount } = analysis
-  const laneMembers = new Map()
+  const laneMembers = new Map<number, LayoutCard[]>()
   for (let lane = 0; lane < laneCount; lane++) laneMembers.set(lane, [])
   for (const card of cards) {
     const lane = laneOf.get(card.id) ?? 0
     const members = laneMembers.get(lane)
     if (members !== undefined) members.push(card)
   }
-  const slotOf = new Map()
+  const slotOf = new Map<string, number>()
   for (const members of laneMembers.values()) {
     const ordered = members
       .map((card, index) => ({ card, index }))
       .sort((a, b) => ((depth.get(a.card.id) ?? 0) - (depth.get(b.card.id) ?? 0)) || (a.index - b.index))
-    for (let slot = 0; slot < ordered.length; slot++) slotOf.set(ordered[slot].card.id, slot)
+    for (let slot = 0; slot < ordered.length; slot++) {
+      // 循环条件保证 ordered[slot] 存在。
+      slotOf.set((ordered[slot] as { card: LayoutCard }).card.id, slot)
+    }
   }
-  const positions = {}
+  const positions: Record<string, Position> = {}
   for (const card of cards) {
     const lane = laneOf.get(card.id) ?? 0
     const slot = slotOf.get(card.id) ?? 0
@@ -353,15 +439,17 @@ export function layoutByBranch(model, options = {}) {
 }
 
 /** Engine table, so a setting can name an engine without a switch in app.js. */
-export const LAYOUT_ENGINES = Object.freeze({
+export const LAYOUT_ENGINES: Readonly<Record<string, LayoutEngine>> = Object.freeze({
   [LAYOUT_MODES.horizontal]: layoutHorizontal,
   [LAYOUT_MODES.vertical]: layoutVertical,
   [LAYOUT_MODES.branch]: layoutByBranch,
 })
 
 /** Run one engine by id; unknown ids throw instead of silently doing nothing. */
-export function layoutCards(model, mode, options = {}) {
-  const engine = LAYOUT_ENGINES[mode]
+export function layoutCards(model: LayoutModelInput | null | undefined, mode: unknown, options: LayoutOptions = {}): LayoutResult {
+  const engines: Record<string, LayoutEngine | undefined> = LAYOUT_ENGINES
+  // `mode` 保持 `unknown`：非法值必须走到下面那条 TypeError，而不是在类型层被拦。
+  const engine = engines[mode as string]
   if (typeof engine !== 'function') throw new TypeError(`未知的布局模式: ${String(mode)}`)
   return engine(model, options)
 }
@@ -380,12 +468,12 @@ export function layoutCards(model, mode, options = {}) {
  * - Only cards present in the model are patched; unknown layout entities keep
  *   their coordinates.
  */
-export function layoutToCommandIntent(model, positions, options = {}) {
+export function layoutToCommandIntent(model: LayoutModelInput | null | undefined, positions: unknown, options: LayoutOptions = {}): LayoutIntent {
   if (!isPlainObject(positions)) throw new TypeError('positions 必须是对象')
   const area = typeof options.area === 'string' && options.area !== '' ? options.area : LAYOUT_PATCH_AREA
   const kind = typeof options.kind === 'string' && options.kind !== '' ? options.kind : LAYOUT_COMMAND_KIND
   const { cards } = cardsOf(model)
-  const patches = []
+  const patches: LayoutPatch[] = []
   for (const card of cards) {
     const next = positions[card.id]
     if (next === undefined || next === null) continue
@@ -406,7 +494,7 @@ export function layoutToCommandIntent(model, positions, options = {}) {
  * `layout` carries the engine result (movedCount / unresolved) for status text;
  * the top-level `kind`/`patches` stay commit-compatible.
  */
-export function layoutIntent(model, mode, options = {}) {
+export function layoutIntent(model: LayoutModelInput | null | undefined, mode: unknown, options: LayoutOptions = {}): LayoutIntentWithResult {
   const result = layoutCards(model, mode, options)
   const intent = layoutToCommandIntent(model, result.positions, options)
   return { ...intent, layout: result }
