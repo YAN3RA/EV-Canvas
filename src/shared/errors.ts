@@ -37,7 +37,13 @@ export class RevisionConflictError extends Error {
   readonly expected: number;
   /** 实际 revision */
   readonly actual: number;
-  readonly code: string = 'REVISION_CONFLICT';
+  /**
+   * 机器可读错误码。**故意可变**：同一类冲突在不同业务路径上有更具体的码
+   * （如 store 的 `PROJECTION_EPOCH_CONFLICT`），由抛出点覆盖而不是为每种情况
+   * 新建子类。声明成 `readonly` 会逼调用方写 `(error as {code: string}).code = ...`
+   * 那种绕行断言，反而更危险。
+   */
+  code: string = 'REVISION_CONFLICT';
 
   constructor(currentRevisionOrMessage: number | string, expectedOrMessage?: number | string, actual?: number) {
     if (typeof currentRevisionOrMessage === 'string') {
