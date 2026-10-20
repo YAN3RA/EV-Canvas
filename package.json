@@ -29,6 +29,7 @@
     "build:server": "tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs",
     "pack:plugin": "npm run build && node scripts/pack-plugin.mjs",
     "verify:package": "node scripts/verify-package.mjs",
+    "check:dist": "node scripts/check-dist.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

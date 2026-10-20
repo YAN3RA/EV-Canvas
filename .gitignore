@@ -2,7 +2,11 @@
 node_modules/
 
 # build output
-dist/
+# dist/ **提交进仓库**：DSH 从 GitHub 装插件时不会替我们跑构建，
+# 只有把编译产物纳入版本控制，`main` / `exports` 才能在安装后指得到文件。
+# 这是与 dsh-share / dsh-ops 等插件「lib/ 即产物」同一做法，代价是 513 KB。
+# sourcemap 不提交（占 1.2 MB 且只用于本地调试）。
+dist/**/*.map
 
 # test artifacts
 coverage/
