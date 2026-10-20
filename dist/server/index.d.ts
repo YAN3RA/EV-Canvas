@@ -34,19 +34,24 @@ export { PLUGIN_META, ROUTE_PREFIX };
  * `PLUGIN_META.id` 是插件在自身数据/路由里用的短标识，两者不是一回事。
  */
 export declare const name: "dsh-evcanvas";
-/** 注入的宿主服务：只要 Web Server，不额外开端口/服务。 */
-export declare const inject: readonly ["webServer"];
+/**
+ * 注入的宿主服务。
+ *
+ * `sessions` 是会话投影（S0-5）的**唯一**内容来源：DSH 拥有会话日志，插件只做
+ * 投影副本。不注入它就没有任何合法途径读到会话事件——旧版同一位置也是这两个
+ * （`dsh-synapnova@3fd1d00` `index.js:24`），属于已在真实宿主跑通的契约。
+ */
+export declare const inject: readonly ["webServer", "sessions"];
 /**
  * 宿主注册入口。
  *
  * 与旧版骨架的差别：这里**不再抛 `not implemented`**。它实例化 `WorkspaceStore`
  * 并挂载路由；store 自身的原子写、锁、digest、幂等窗口全部沿用迁移实现。
  *
+ * 已接：路由、静态产物、会话投影订阅（S0-5，`session/created` + `session/event`）。
  * 尚未接的部分（如实标注，不冒充已实现）：
- *   - S0-5 会话投影订阅（`session/created`、`session/event`）—— 需要 `sessions` 服务，
- *     vNext 尚未决定订阅契约（`ready` 握手，ADR-0003 待写）
- *   - S0-3 媒体资产上传路由
- *   - 前端 UI：仍是骨架页
+ *   - S0-3 媒体资产上传路由（`assets.ts` 已实现且有测试，缺 HTTP 层）
+ *   - S0-6 历史回填的 HTTP 入口（store 侧 `syncHistory` 已就绪）
  */
 export declare function apply(ctx: unknown, config: PluginConfig): void;
 /**

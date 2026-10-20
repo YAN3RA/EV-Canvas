@@ -122,7 +122,9 @@ describe('插件元信息', () => {
   it('插件名等于包名，与路由前缀用的短 id 区分开', () => {
     expect(name).toBe('dsh-evcanvas');
     expect(name).not.toBe(PLUGIN_META.id);
-    expect(inject).toEqual(['webServer']);
+    // `sessions` 是 S0-5 会话投影的唯一合法内容来源；少了它就没有任何途径
+    // 读到会话事件，画布必然一直是空的。旧版同一位置也是这两个服务。
+    expect(inject).toEqual(['webServer', 'sessions']);
     expect(PLUGIN_META.id).toBe('evcanvas');
     expect(ROUTE_PREFIX).toBe('/evcanvas');
     expect(PLUGIN_META.format).toBe('dsh-evcanvas');
