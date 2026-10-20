@@ -54,20 +54,76 @@ export function App(): React.JSX.Element {
     [canvas.activeWorkspaceId],
   );
 
+  /**
+   * 把字段级 patch 应用到当前权威布局上，得到服务端要的**完整快照**。
+   *
+   * 为什么不能直接把 patches 发过去：服务端 `updateLayout` 的 body 形状是
+   * `{ layout: { cards, collapsed, viewport }, regions?, annotations? }`，
+   * 没有 `patches` 这个概念。它的语义是「按字段覆盖」，所以必须在客户端
+   * 先把 patch 落到一份完整布局上，否则服务端不知道 `layoutCards` 该落到哪。
+   *
+   * 缺失字段的处理：`readLayoutBundle` 返回的已经是完整布局（空也是空对象），
+   * 因此这里不会产生 `undefined` 字段，也就不会误清空服务端数据。
+   */
+  const snapshotFromPatches = useCallback((patches: Patch[]) => {
+    const base = readLayoutBundle(modelRef.current);
+    const cards: Record<string, { x: number; y: number }> = { ...(base.cards ?? {}) };
+    const collapsed: Record<string, true> = { ...(base.collapsed ?? {}) };
+    let viewport = { ...(base.viewport ?? { x: 0, y: 0, zoom: 1 }) };
+    for (const patch of patches) {
+      const before = patch.before as { x: number; y: number } | null | undefined;
+      const after = patch.after as { x: number; y: number } | null | undefined;
+      if (patch.area === 'layoutCards') {
+        // after 为 null 表示「清除手动位置」，回到自动布局。
+        if (after === null || after === undefined) delete cards[patch.id];
+        else cards[patch.id] = { x: after.x, y: after.y };
+        void before;
+      } else if (patch.area === 'layoutCollapsed') {
+        if (after === null || after === undefined) delete collapsed[patch.id];
+        else collapsed[patch.id] = true;
+      } else if (patch.area === 'layoutViewport') {
+        if (after !== null && after !== undefined) viewport = { ...viewport, ...(after as { x?: number; y?: number; zoom?: number }) };
+      }
+    }
+    return {
+      cards,
+      collapsed,
+      viewport,
+      // regions / annotations 原样带上：它们不是 patch 目标，但服务端按字段覆盖，
+      // 不带就会保持原值（这是我们要的），带了则必须与当前一致。
+      regions: base.regions ?? [],
+      annotations: base.annotations ?? [],
+    };
+  }, []);
+
   const submitPatches = useCallback(
     async (patches: Patch[]) => {
       if (patches.length === 0) return;
       const workspaceId = canvas.activeWorkspaceId;
-      const revision = modelRef.current?.revision;
+      const model = modelRef.current;
+      const revision = model?.revision;
+      const projectionEpoch = model?.projectionEpoch;
       if (workspaceId === null || typeof revision !== 'number') {
         // 没有工作区或没有版本号时**不假装保存成功**，明确告知用户。
         setSaveError('当前没有可写入的工作区（或缺少 revision），改动未保存');
         return;
       }
+      if (typeof projectionEpoch !== 'number' || projectionEpoch < 1) {
+        // 纪元缺失时同样不猜：服务端会以 400 拒绝，与其让用户看到晦涩的报错，
+        // 不如在这里说清「数据还没加载完」。
+        setSaveError('缺少 projectionEpoch，数据可能尚未加载完成，改动未保存');
+        return;
+      }
       setSaving(true);
       setSaveError(null);
       try {
-        await patchLayout(workspaceId, revision, patches);
+        const snapshot = snapshotFromPatches(patches);
+        await patchLayout(workspaceId, revision, {
+          projectionEpoch,
+          layout: { cards: snapshot.cards, collapsed: snapshot.collapsed, viewport: snapshot.viewport },
+          regions: snapshot.regions,
+          annotations: snapshot.annotations,
+        });
         setHistoryVersion(version => version + 1);
         await canvas.reload();
       } catch (error) {
@@ -76,7 +132,7 @@ export function App(): React.JSX.Element {
         setSaving(false);
       }
     },
-    [canvas],
+    [canvas, snapshotFromPatches],
   );
 
   /** 视图变化 → 命令意图 → 历史记录 → 提交。 */
@@ -91,24 +147,16 @@ export function App(): React.JSX.Element {
   const undo = useCallback(async () => {
     const entry = history.undo();
     if (entry === null) return;
-    const workspaceId = canvas.activeWorkspaceId;
-    const revision = modelRef.current?.revision;
-    if (workspaceId === null || typeof revision !== 'number') {
-      setSaveError('缺少 workspaceId 或 revision，撤销未提交到服务端');
-      return;
-    }
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await patchLayout(workspaceId, revision, entry.patches as Patch[]);
-      setHistoryVersion(version => version + 1);
-      await canvas.reload();
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSaving(false);
-    }
-  }, [canvas, history]);
+    /**
+     * 撤销走**同一条**提交路径。
+     *
+     * 为什么必须复用而不是另写一遍：撤销的补丁同样是字段级 `{area,id,before,after}`，
+     * 服务端只认完整布局快照。此前这里单独调 `patchLayout(workspaceId, revision, patches)`
+     * 用的是旧签名（发 `{expectedRevision, patches}`），于是拖拽和撤销一起 400——
+     * 两个症状、一个根因。共用 `submitPatches` 后，这条路径再没有第二份实现可走样。
+     */
+    await submitPatches(entry.patches as Patch[]);
+  }, [history, submitPatches]);
 
   /**
    * 卡片拖拽落位：一次拖拽 → 一次提交 → 一步撤销。

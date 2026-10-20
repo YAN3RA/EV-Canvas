@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { patchLayout, readLayoutBundle } from '@/ui/data';
+import { patchLayout, readLayoutBundle, uuidv7 } from '@/ui/data';
 import { buildCanvasModel } from '@/canvas/model';
 
 /**
@@ -136,45 +136,88 @@ describe('patchLayout', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('拒绝不合法的 expectedRevision，不发请求（不允许无版本号写入）', async () => {
+  /** 造一份最小合法布局快照。 */
+  function snapshot() {
+    return {
+      cards: { 'card-1': { x: 10, y: 20 } },
+      collapsed: {},
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+  }
+
+  it('baseRevision 非法时不发请求（不允许无版本号写入）', async () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock;
-    await expect(patchLayout('w1', Number.NaN, [{ area: 'layoutViewport', id: 'viewport', before: null, after: null }])).rejects.toThrow(
-      /expectedRevision/,
-    );
-    await expect(patchLayout('w1', -1, [{ area: 'layoutViewport', id: 'viewport', before: null, after: null }])).rejects.toThrow(
-      /expectedRevision/,
-    );
+    for (const bad of [Number.NaN, 0, -1, 1.5]) {
+      await expect(patchLayout('w1', bad, { projectionEpoch: 1, layout: snapshot() })).rejects.toThrow(/baseRevision/);
+    }
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('空 patch 直接返回，不发请求', async () => {
+  it('projectionEpoch 非法时不发请求（服务端会 400，但先本地拒掉）', async () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock;
-    await expect(patchLayout('w1', 3, [])).resolves.toEqual({});
+    for (const bad of [0, -1, Number.NaN, 1.5]) {
+      await expect(patchLayout('w1', 3, { projectionEpoch: bad, layout: snapshot() })).rejects.toThrow(/projectionEpoch/);
+    }
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('带上 expectedRevision 与 patches 发 PATCH', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ revision: 4 }),
-    });
+  /**
+   * 契约回归：请求体必须是服务端 `validateEnvelope` 认的完整信封。
+   *
+   * 这条锁的是**形状**，不是行为。早先发 `{ expectedRevision, patches }`，
+   * 服务端直接 400「layout 写入必须携带 projectionEpoch」，拖拽与撤销一起失效。
+   * 光测「发出了 PATCH」是抓不到这类错的。
+   */
+  it('请求体是完整信封：workspaceId/baseRevision/operationId/projectionEpoch/action/body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ revision: 4 }) });
     globalThis.fetch = fetchMock;
-    const patches = [{ area: 'layoutViewport', id: 'viewport', before: { x: 0, y: 0, zoom: 1 }, after: { x: 5, y: 5, zoom: 2 } }];
-    const result = await patchLayout('w1', 3, patches);
+    const result = await patchLayout('w1', 3, { projectionEpoch: 2, layout: snapshot() });
     expect(result).toEqual({ revision: 4 });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('/evcanvas/api/workspaces/w1/layout');
     expect(init.method).toBe('PATCH');
-    expect(JSON.parse(init.body)).toEqual({ expectedRevision: 3, patches });
+    const body = JSON.parse(init.body);
+    expect(body.workspaceId).toBe('w1');
+    expect(body.baseRevision).toBe(3);
+    expect(body.projectionEpoch).toBe(2);
+    expect(body.action).toBe('workspace.layout');
+    expect(body.body.layout).toEqual(snapshot());
+    // operationId 必须是标准小写 UUIDv7（服务端用正则强制）
+    expect(body.operationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // 旧形状不能复活
+    expect(body).not.toHaveProperty('expectedRevision');
+    expect(body).not.toHaveProperty('patches');
+  });
+
+  it('regions / annotations 只在显式传入时才发（不传等于不清空）', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    globalThis.fetch = fetchMock;
+    await patchLayout('w1', 3, { projectionEpoch: 1, layout: snapshot() });
+    let body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.body).not.toHaveProperty('regions');
+    expect(body.body).not.toHaveProperty('annotations');
+
+    await patchLayout('w1', 3, { projectionEpoch: 1, layout: snapshot(), regions: [], annotations: [] });
+    body = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(body.body.regions).toEqual([]);
+    expect(body.body.annotations).toEqual([]);
+  });
+
+  it('operationId 可注入（重试同一操作必须复用同一个值）', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    globalThis.fetch = fetchMock;
+    const fixed = '0192f0a0-0000-7000-8000-000000000001';
+    await patchLayout('w1', 3, { projectionEpoch: 1, layout: snapshot(), operationId: fixed });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).operationId).toBe(fixed);
   });
 
   it('工作区 id 会被 URL 编码，避免路径注入', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
     globalThis.fetch = fetchMock;
-    await patchLayout('a/../b', 1, [{ area: 'layoutViewport', id: 'viewport', before: null, after: null }]);
+    await patchLayout('a/../b', 1, { projectionEpoch: 1, layout: snapshot() });
     expect(fetchMock.mock.calls[0][0]).toBe('/evcanvas/api/workspaces/a%2F..%2Fb/layout');
   });
 
@@ -185,8 +228,21 @@ describe('patchLayout', () => {
       statusText: 'Conflict',
       text: async () => 'expected 3 got 4',
     });
-    await expect(
-      patchLayout('w1', 3, [{ area: 'layoutViewport', id: 'viewport', before: null, after: null }]),
-    ).rejects.toThrow(/409.*expected 3 got 4/s);
+    await expect(patchLayout('w1', 3, { projectionEpoch: 1, layout: snapshot() })).rejects.toThrow(/409.*expected 3 got 4/s);
+  });
+});
+
+describe('uuidv7', () => {
+  it('形状合法：小写、版本位 7、变体位 8/9/a/b', () => {
+    for (let i = 0; i < 50; i++) {
+      expect(uuidv7()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    }
+  });
+
+  it('单调：后生成的按字典序不小于先生成的（幂等窗口依赖这个）', async () => {
+    const first = uuidv7();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const second = uuidv7();
+    expect(second >= first).toBe(true);
   });
 });

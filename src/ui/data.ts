@@ -157,23 +157,99 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
 }
 
 /**
- * 把字段级 patch 提交到服务端。
+ * 生成一个标准小写 UUIDv7（服务端 `validateEnvelope` 强制要求）。
  *
- * 服务端要求 `expectedRevision` 做乐观并发：不传就等于放任覆盖别人。
- * 这里强制调用方给出 revision，缺失时直接拒绝，不猜。
+ * 为什么必须 v7 而不是 v4：服务端的幂等窗口按 `operationId` 排序并推进
+ * `idempotencyFloor`（`trimIdempotency` 依赖「id 越大越新」）。v4 是随机序，
+ * 会把这个假设打穿——旧条目可能排在新条目之后，floor 一旦推进过头，
+ * 后续合法请求会被判成 `IdempotencyExpiredError`。
+ *
+ * 位布局（RFC 9562）：48 位毫秒时间戳 + 4 位版本(7) + 12 位随机 + 2 位变体(10) + 62 位随机。
+ */
+export function uuidv7(): string {
+  const bytes = new Uint8Array(16);
+  const now = Date.now();
+  // 时间戳高位在前（大端），占前 6 字节。
+  bytes[0] = (now / 2 ** 40) & 0xff;
+  bytes[1] = (now / 2 ** 32) & 0xff;
+  bytes[2] = (now / 2 ** 24) & 0xff;
+  bytes[3] = (now / 2 ** 16) & 0xff;
+  bytes[4] = (now / 2 ** 8) & 0xff;
+  bytes[5] = now & 0xff;
+  crypto.getRandomValues(bytes.subarray(6));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x70; // 版本 7
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80; // 变体 10xx
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** 服务端 `updateLayout` 接受的布局字段（其余字段一概不发，避免误清空）。 */
+export interface LayoutSnapshot {
+  cards: Record<string, { x: number; y: number }>;
+  collapsed: Record<string, true>;
+  viewport: { x: number; y: number; zoom: number };
+}
+
+export interface PatchLayoutOptions {
+  /** 工作区当前纪元；服务端用它拒绝「基于旧投影」的写入。 */
+  projectionEpoch: number;
+  /** 要提交的完整布局快照（服务端按字段覆盖，缺字段即不动）。 */
+  layout: LayoutSnapshot;
+  /** 可选：随同提交的顶层字段。不传则服务端保留原值。 */
+  regions?: unknown[];
+  annotations?: unknown[];
+  /** 幂等键；不传则自动生成。重试同一操作时必须复用同一个值。 */
+  operationId?: string;
+}
+
+/**
+ * 提交布局到服务端。
+ *
+ * ## 请求形状由服务端契约决定，不是自由发挥
+ *
+ * `WorkspaceStore.updateLayout` 走 `mutate` → `validateEnvelope`，要求**完整信封**：
+ *
+ *   workspaceId / baseRevision / operationId(UUIDv7) / projectionEpoch / action / body
+ *
+ * 其中 `body` 必须是 `{ layout: {...}, regions?, annotations? }`，而 `layout` 内部
+ * 才是 `cards` / `collapsed` / `viewport`。**不是** `{ expectedRevision, patches }`
+ * ——早先按后者发，服务端直接 400「layout 写入必须携带 projectionEpoch」，
+ * 拖拽和撤销一起失效（两者共用这条提交路径）。
+ *
+ * ## 为什么 revision 与 epoch 都必须给
+ *
+ * `baseRevision` 是乐观锁：版本落后即 409，防覆盖别人。`projectionEpoch` 是投影
+ * 世代：数据文件被外部重写或工作区重建后纪元会 +1，此时基于旧纪元的布局补丁
+ * 必须被拒，否则会把陈旧坐标写到新投影上。
  */
 export async function patchLayout(
   workspaceId: string,
-  expectedRevision: number,
-  patches: Patch[],
+  baseRevision: number,
+  options: PatchLayoutOptions,
 ): Promise<{ revision?: number }> {
-  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
-    throw new Error('patchLayout: 需要合法的 expectedRevision，拒绝无版本号写入');
+  if (!Number.isInteger(baseRevision) || baseRevision < 1) {
+    throw new Error('patchLayout: baseRevision 必须是不小于 1 的整数（服务端拒绝无版本号写入）');
   }
-  if (patches.length === 0) return {};
+  if (!Number.isSafeInteger(options.projectionEpoch) || options.projectionEpoch < 1) {
+    throw new Error('patchLayout: projectionEpoch 必须是正安全整数（服务端拒绝缺纪元的写入）');
+  }
+  const body: Record<string, unknown> = { layout: options.layout };
+  // regions / annotations 是工作区**顶层**字段，只在调用方真的带了才发：
+  // 无条件发送等于用空数组清空它们（服务端见 `Object.hasOwn` 即覆盖）。
+  if (options.regions !== undefined) body['regions'] = options.regions;
+  if (options.annotations !== undefined) body['annotations'] = options.annotations;
+
+  const envelope = {
+    workspaceId,
+    baseRevision,
+    operationId: options.operationId ?? uuidv7(),
+    projectionEpoch: options.projectionEpoch,
+    action: 'workspace.layout',
+    body,
+  };
   return requestJson<{ revision?: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/layout`, {
     method: 'PATCH',
-    body: JSON.stringify({ expectedRevision, patches }),
+    body: JSON.stringify(envelope),
   });
 }
 
