@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { patchLayout, readLayoutBundle, uuidv7 } from '@/ui/data';
+import { patchLayout, readLayoutBundle, selectWorkspaceTarget, uuidv7 } from '@/ui/data';
 import { buildCanvasModel } from '@/canvas/model';
 
 /**
@@ -35,6 +35,26 @@ function minimalDocument(overrides = {}) {
   }
   return merged;
 }
+
+describe('会话目录选择', () => {
+  const rows = [{ id: 'first', cwd: 'C:/first' }, { id: 'selected', cwd: 'C:/selected' }];
+
+  it('绑定目录优先于上次工作区与列表首项，显式 id 仍最高优先', () => {
+    expect(selectWorkspaceTarget(rows, undefined, 'C:/selected', 'first')).toBe('selected');
+    expect(selectWorkspaceTarget(rows, 'explicit', 'C:/not-synced', 'first')).toBe('explicit');
+  });
+
+  it('绑定目录投影未到达时明确报错，不回退到其他目录', () => {
+    expect(() => selectWorkspaceTarget(rows, undefined, 'C:/not-synced', 'first')).toThrow(/尚未出现在画布投影/);
+    expect(() => selectWorkspaceTarget([], undefined, 'C:/not-synced', null)).toThrow(/尚未出现在画布投影/);
+  });
+
+  it('无目录的独立页面仍沿用当前工作区、首项、空列表的旧顺序', () => {
+    expect(selectWorkspaceTarget(rows, undefined, null, 'selected')).toBe('selected');
+    expect(selectWorkspaceTarget(rows, undefined, '', null)).toBe('first');
+    expect(selectWorkspaceTarget([], undefined, null, null)).toBeNull();
+  });
+});
 
 describe('readLayoutBundle', () => {
   it('模型为 null 时给出完整空布局，而不是抛错', () => {

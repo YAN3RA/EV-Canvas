@@ -34,6 +34,22 @@ export interface WorkspaceSummary {
   threadCount?: number;
 }
 
+/** 会话目录有明确来源时必须匹配；只有无目录的独立页面保留原回退顺序。 */
+export function selectWorkspaceTarget(
+  workspaces: WorkspaceSummary[],
+  initialWorkspaceId: string | undefined,
+  cwd: string | null,
+  currentWorkspaceId: string | null,
+): string | null {
+  if (initialWorkspaceId !== undefined) return initialWorkspaceId;
+  if (cwd !== null && cwd !== '') {
+    const match = workspaces.find(item => item.cwd === cwd);
+    if (match === undefined) throw new Error('当前会话目录尚未出现在画布投影中，请等待同步后刷新。');
+    return match.id;
+  }
+  return currentWorkspaceId ?? workspaces[0]?.id ?? null;
+}
+
 interface WorkspaceListResponse {
   workspaces: WorkspaceSummary[];
 }
@@ -144,10 +160,11 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
         setState(previous => ({ ...previous, workspaces }));
       }
       /**
-       * 选中优先级：显式传入 > URL 里的 `?cwd=` > 当前选中（ref）> 列表第一个。
+       * 选中优先级：显式传入 > URL 里的 `?cwd=`；无绑定目录时才回退当前选中/首项。
+       * 显式 cwd 没有匹配投影时停止加载并提示，不把其他工作区当作当前目录。
        *
-       * `?cwd=` 来自客户端壳：宿主在 `conversation.view` 槽位里把当前会话的
-       * `scope.cwd` 拼进 iframe URL（见 `src/client/index.js` 的 `CanvasBody`）。
+       * `?cwd=` 来自客户端壳：主面板从标准 `useSessions` 读取当前会话，
+       * 对话视图按标准 `sessionId` 读取会话行，再由 `CanvasBody` 编码目录。
        * 有它，画布就能自动定位到用户正在看的那个会话所在目录，
        * 顶栏那排目录按钮因此可以去掉（UI-D19）。
        *
@@ -162,10 +179,7 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
       const cwdParam = typeof location !== 'undefined'
         ? new URLSearchParams(location.search).get('cwd')
         : null;
-      const byCwd = cwdParam === null || cwdParam === ''
-        ? null
-        : workspaces.find(item => typeof item.cwd === 'string' && item.cwd === cwdParam)?.id ?? null;
-      const target = initialWorkspaceId ?? byCwd ?? activeWorkspaceIdRef.current ?? workspaces[0]?.id ?? null;
+      const target = selectWorkspaceTarget(workspaces, initialWorkspaceId, cwdParam, activeWorkspaceIdRef.current);
       await loadWorkspace(target);
     } catch (error) {
       if (aliveRef.current) {

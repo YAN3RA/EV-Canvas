@@ -26,7 +26,16 @@ function fakeReact() {
  *
  * 每次调用都新建一套假 ctx，避免用例之间串味。
  */
-async function loadClient() {
+function sessionRow(id, cwd = 'C:/work', mainView = 0) {
+  return { id, cwd, retainedBy: { mainView } };
+}
+function sessionList(...rows) {
+  return { ids: rows.map(row => row.id), byId: Object.fromEntries(rows.map(row => [row.id, row])) };
+}
+
+async function loadClient(initialSessions = sessionList(sessionRow('session-a', 'C:/work', 1))) {
+  let snapshot = initialSessions;
+  const useSessions = vi.fn(selector => selector(snapshot));
   /** 记录所有注册动作。 */
   const registered = { tabs: [], slots: [], effects: [] };
   const opened = [];
@@ -80,7 +89,7 @@ async function loadClient() {
 
   const plugin = loader.captured.module;
   plugin.apply(ctx);
-  return { id: loader.captured.id, plugin, registered, opened };
+  return { id: loader.captured.id, plugin, registered, opened, useSessions, setSessions: next => { snapshot = next; } };
 }
 
 describe('客户端入口', () => {
@@ -93,10 +102,13 @@ describe('客户端入口', () => {
     const { plugin } = await loadClient();
     expect(plugin.inject).toContain('slots');
     expect(plugin.inject).toContain('sidebarRightTabs');
+    const { readFile } = await import('node:fs/promises');
+    const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+    expect(manifest.dsh.client.inject).toContain('@deepseek-ai/dsh-client-ui-session');
   });
 
   it('在对话顶栏的视图位注册入口（与对话/轨迹/上下文/编队同一排）', async () => {
-    const { registered } = await loadClient();
+    const { registered, useSessions } = await loadClient();
     const view = registered.slots.find(item => item.options.name === 'conversation.view');
     expect(view, '缺少 conversation.view 注册：用户点不到入口').toBeDefined();
     expect(view.options.id).toBe('evcanvas');
@@ -106,63 +118,81 @@ describe('客户端入口', () => {
     // order 必须大于编队的 30，排在它后面
     expect(view.options.order).toBeGreaterThan(30);
     // 正文渲染出来是画布
-    const element = view.component();
+    const element = view.component({ sessionId: 'session-a', useSessions });
     expect(element.type).toBe('iframe');
-    expect(element.props.src).toBe('/evcanvas/');
+    expect(element.props.src).toBe('/evcanvas/?cwd=C%3A%2Fwork');
   });
 
-  it('对话视图将 cwd 安全编码为单个查询参数，并以 URL 作 iframe key', async () => {
-    const { registered } = await loadClient();
-    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+  it('对话视图按标准 sessionId 读取目录，编码安全且忽略旧 scope', async () => {
     const cwd = 'C:/项目 A/#草稿?x=1&y=2';
-    const element = view.component({ scope: { sessionId: 'session-a', cwd } });
+    const { registered, useSessions } = await loadClient(sessionList(sessionRow('session-a', cwd, 1)));
+    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+    const element = view.component({ sessionId: 'session-a', useSessions, scope: { cwd: 'C:/wrong' } });
     expect(element.props.src).toBe('/evcanvas/?cwd=' + encodeURIComponent(cwd));
     expect(new URL(element.props.src, 'https://host.invalid').searchParams.get('cwd')).toBe(cwd);
     expect(element.props.key).toBe(element.props.src);
     expect(element.props.src).not.toContain('session-a');
+    expect(useSessions).toHaveBeenCalled();
   });
 
-  it('不同 cwd 产生不同 iframe key，避免复用上一目录画面', async () => {
-    const { registered } = await loadClient();
-    const view = registered.slots.find(item => item.options.name === 'conversation.view');
-    const a = view.component({ scope: { sessionId: 'a', cwd: 'C:/work/a' } });
-    const b = view.component({ scope: { sessionId: 'b', cwd: 'C:/work/b' } });
-    expect(a.props.src).not.toBe(b.props.src);
+  it('主面板跟随宿主快照切换 cwd，不按列表第一个或旧会话回退', async () => {
+    const { registered, useSessions, setSessions } = await loadClient(sessionList(
+      sessionRow('other', 'C:/wrong'), sessionRow('a', 'C:/work/a', 1),
+    ));
+    const main = registered.slots.find(item => item.options.name === 'main');
+    const a = main.component({ useSessions }).children[0];
+    setSessions(sessionList(sessionRow('a', 'C:/work/a'), sessionRow('b', 'C:/work/b', 1)));
+    const b = main.component({ useSessions }).children[0];
+    expect(a.props.src).toBe('/evcanvas/?cwd=C%3A%2Fwork%2Fa');
+    expect(b.props.src).toBe('/evcanvas/?cwd=C%3A%2Fwork%2Fb');
     expect(a.props.key).not.toBe(b.props.key);
   });
 
-  it('同 cwd 切换 sessionId 不改变当前 URL（尚未接会话定位）', async () => {
-    const { registered } = await loadClient();
+  it('对话绑定身份优先于 mainView，同 cwd 不冒充已实现卡片定位', async () => {
+    const { registered, useSessions } = await loadClient(sessionList(
+      sessionRow('a', 'C:/other', 1), sessionRow('b', 'C:/work'), sessionRow('c', 'C:/work'),
+    ));
     const view = registered.slots.find(item => item.options.name === 'conversation.view');
-    const a = view.component({ scope: { sessionId: 'a', cwd: 'C:/work' } });
-    const b = view.component({ scope: { sessionId: 'b', cwd: 'C:/work' } });
-    expect(a.props.src).toBe(b.props.src);
-    expect(a.props.key).toBe(b.props.key);
+    const b = view.component({ sessionId: 'b', useSessions });
+    const c = view.component({ sessionId: 'c', useSessions });
+    expect(b.props.src).toBe('/evcanvas/?cwd=C%3A%2Fwork');
+    expect(b.props.src).toBe(c.props.src);
+    expect(b.props.key).toBe(c.props.key);
+    expect(view.component({ sessionId: 'gone', useSessions }).props.role).toBe('status');
   });
 
-  it('缺省、空或非字符串 cwd 回退入口页，不生成无效查询参数', async () => {
-    const { registered } = await loadClient();
-    const view = registered.slots.find(item => item.options.name === 'conversation.view');
-    for (const props of [undefined, {}, { scope: null }, { scope: {} }, { scope: { cwd: '' } }, { scope: { cwd: 42 } }]) {
-      const element = view.component(props);
-      expect(element.type).toBe('iframe');
-      expect(element.props.src).toBe('/evcanvas/');
-      expect(element.props.key).toBe('/evcanvas/');
+  it('未就绪、无会话、歧义引用或缺目录时显示状态，不加载默认工作区', async () => {
+    const { registered, useSessions, setSessions } = await loadClient();
+    const main = registered.slots.find(item => item.options.name === 'main');
+    const cases = [undefined, sessionList(), sessionList(sessionRow('a', '', 1)),
+      sessionList(sessionRow('a', 42, 1)), sessionList(sessionRow('a', null, 1)),
+      sessionList(sessionRow('a', 'C:/a', 1), sessionRow('b', 'C:/b', 1))];
+    for (const snapshot of cases) {
+      setSessions(snapshot);
+      const element = main.component({ useSessions }).children[0];
+      expect(element.props.role).toBe('status');
+      expect(element.type).not.toBe('iframe');
+      expect(element.props.src).toBeUndefined();
     }
+    expect(main.component().children[0].props.role).toBe('status');
+    // 即使传入旧 scope，它也不再成为会话身份来源。
+    expect(main.component({ scope: { cwd: 'C:/wrong' } }).children[0].props.src).toBeUndefined();
   });
 
-  it('当前主面板没有透传 scope：不能用对话视图用例代替主面板验收', async () => {
-    const { registered } = await loadClient();
+  it('主面板与对话视图共用宿主身份；引用释放后不显示上一目录', async () => {
+    const { registered, useSessions, setSessions } = await loadClient();
     const main = registered.slots.find(item => item.options.name === 'main');
     const view = registered.slots.find(item => item.options.name === 'conversation.view');
-    const props = { scope: { sessionId: 'a', cwd: 'C:/work' } };
-    const panel = main.component(props);
-    expect(panel.children[0].props.src).toBe('/evcanvas/');
-    expect(view.component(props).props.src).toBe('/evcanvas/?cwd=C%3A%2Fwork');
+    expect(main.component({ useSessions }).children[0].props.src)
+      .toBe(view.component({ sessionId: 'session-a', useSessions }).props.src);
+    setSessions(sessionList(sessionRow('session-a', 'C:/work', 0)));
+    expect(main.component({ useSessions }).children[0].props.role).toBe('status');
+    setSessions(sessionList());
+    expect(view.component({ sessionId: 'session-a', useSessions }).props.role).toBe('status');
   });
 
   it('注册右栏标签类型，只认领自己的地址前缀', async () => {
-    const { registered } = await loadClient();
+    const { registered, useSessions } = await loadClient();
     expect(registered.tabs).toHaveLength(1);
     const definition = registered.tabs[0];
     expect(definition.kind).toBe('evcanvas');
@@ -176,18 +206,18 @@ describe('客户端入口', () => {
   });
 
   it('正文注册的 key 与标签类型 id 一致（不一致就渲染不出来）', async () => {
-    const { registered } = await loadClient();
+    const { registered, useSessions } = await loadClient();
     const body = registered.slots.find(item => item.options.name === 'sidebar.right.pane.tab');
     expect(body).toBeDefined();
     expect(body.options.key).toBe(registered.tabs[0].id);
   });
 
   it('正文用 iframe 指向已构建的画布页，并占满容器', async () => {
-    const { registered } = await loadClient();
+    const { registered, useSessions } = await loadClient();
     const body = registered.slots.find(item => item.options.name === 'sidebar.right.pane.tab');
-    const element = body.component();
+    const element = body.component({ useSessions });
     expect(element.type).toBe('iframe');
-    expect(element.props.src).toBe('/evcanvas/');
+    expect(element.props.src).toBe('/evcanvas/?cwd=C%3A%2Fwork');
     expect(element.props.style.width).toBe('100%');
     expect(element.props.style.height).toBe('100%');
   });
@@ -203,7 +233,7 @@ describe('客户端入口', () => {
   });
 
   it('左侧栏导航项注册在 sidebar.panellist，排在三个内置项之后', async () => {
-    const { registered } = await loadClient();
+    const { registered, useSessions } = await loadClient();
     const entry = registered.slots.find(item => item.options.name === 'sidebar.panellist');
     expect(entry, '缺少 sidebar.panellist：左栏不会出现入口').toBeDefined();
     // 内置三项是 0 / 10 / 20，我们必须更大才排在后面
@@ -217,18 +247,18 @@ describe('客户端入口', () => {
   });
 
   it('主面板 key 与左栏导航项 id 一致（不一致点了就是空白）', async () => {
-    const { registered } = await loadClient();
+    const { registered, useSessions } = await loadClient();
     const entry = registered.slots.find(item => item.options.name === 'sidebar.panellist');
     const main = registered.slots.find(item => item.options.name === 'main');
     expect(main, '缺少 main 注册：点左栏会切到空白面板').toBeDefined();
     expect(main.options.key).toBe(entry.options.id);
-    const panel = main.component();
+    const panel = main.component({ useSessions });
     expect(panel.type).toBe('div');
     expect(panel.props.style.width).toBe('100%');
   });
 
   it('每处注册都包在 effect/inject 里，便于宿主卸载时回收', async () => {
-    const { registered } = await loadClient();
+    const { registered, useSessions } = await loadClient();
     // 1 个右栏 tab 类型 + 5 个插槽（左栏导航 / 主面板 / 对话视图 / 右栏正文 / 新标签页菜单）
     expect(registered.tabs).toHaveLength(1);
     expect(registered.slots).toHaveLength(5);
