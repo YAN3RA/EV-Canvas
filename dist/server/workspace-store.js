@@ -881,6 +881,21 @@ export class WorkspaceStore {
     commit(envelope, action, { beforeCommit } = {}) {
         return this.mutate(() => action(this.workspace(envelope['workspaceId'])), { envelope, beforeCommit });
     }
+    /**
+     * Write one complete layout snapshot.
+     *
+     * **Returns the committed `revision`** (and `viewport`, which the caller may
+     * have just clamped). The revision is what makes an optimistic-lock client
+     * work: without it the caller has no way to learn the new version number
+     * except by re-reading the whole workspace, and re-reading is asynchronous
+     * relative to a local write queue.
+     *
+     * Why this matters enough to widen the return type: the canvas write queue
+     * serialises PATCHes, but React re-renders only after the microtask queue
+     * drains. A client that waits for a reload to learn the revision therefore
+     * sends its next queued write with the previous revision and gets 409. Hand
+     * the revision back in the response and the queue can track it synchronously.
+     */
     async updateLayout(workspaceId, input, envelope) {
         if (envelope?.projectionEpoch === undefined)
             throw new InputError('layout 写入必须携带 projectionEpoch');
@@ -915,7 +930,17 @@ export class WorkspaceStore {
             workspace.regions = target.regions;
             workspace.annotations = target.annotations;
             workspace.updatedAt = new Date().toISOString();
-            return { layout: structuredClone(workspace.layout), regions: structuredClone(workspace.regions), annotations: structuredClone(workspace.annotations) };
+            return {
+                layout: structuredClone(workspace.layout),
+                regions: structuredClone(workspace.regions),
+                annotations: structuredClone(workspace.annotations),
+                /**
+                 * 提交后的版本号。`mutate` 内部先把 `workspace.revision` 递增再落盘
+                 * （见 `mutateLocked` 里 `previous.revision + 1` 那段），因此这里读到的
+                 * 就是磁盘上已经生效的版本。取不到时给 `null`，让调用方回落到重新读取。
+                 */
+                revision: typeof workspace.revision === 'number' ? workspace.revision : null,
+            };
         }, { envelope: { ...envelope, action: 'workspace.layout', body: input }, workspaceId });
     }
     async mutate(action, options = {}) {

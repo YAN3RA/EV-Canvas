@@ -254,7 +254,7 @@ export async function patchLayout(
   workspaceId: string,
   baseRevision: number,
   options: PatchLayoutOptions,
-): Promise<{ revision?: number }> {
+): Promise<{ revision?: number | null }> {
   if (!Number.isInteger(baseRevision) || baseRevision < 1) {
     throw new Error('patchLayout: baseRevision 必须是不小于 1 的整数（服务端拒绝无版本号写入）');
   }

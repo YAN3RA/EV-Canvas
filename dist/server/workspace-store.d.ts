@@ -429,10 +429,26 @@ export declare class WorkspaceStore {
     commit(envelope: Record<string, unknown>, action: (workspace: MutableWorkspace) => unknown, { beforeCommit }?: {
         beforeCommit?: () => Promise<void>;
     }): Promise<unknown>;
+    /**
+     * Write one complete layout snapshot.
+     *
+     * **Returns the committed `revision`** (and `viewport`, which the caller may
+     * have just clamped). The revision is what makes an optimistic-lock client
+     * work: without it the caller has no way to learn the new version number
+     * except by re-reading the whole workspace, and re-reading is asynchronous
+     * relative to a local write queue.
+     *
+     * Why this matters enough to widen the return type: the canvas write queue
+     * serialises PATCHes, but React re-renders only after the microtask queue
+     * drains. A client that waits for a reload to learn the revision therefore
+     * sends its next queued write with the previous revision and gets 409. Hand
+     * the revision back in the response and the queue can track it synchronously.
+     */
     updateLayout(workspaceId: string, input: Record<string, unknown> | null | undefined, envelope: Record<string, unknown>): Promise<{
         layout: MutableLayout;
         regions: Record<string, unknown>[];
         annotations: Record<string, unknown>[];
+        revision: number | null;
     }>;
     mutate<T>(action: () => T, options?: MutateOptions): Promise<T>;
     /**

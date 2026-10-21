@@ -98,37 +98,47 @@ export function App(): React.JSX.Element {
   }, []);
 
   /**
-   * 提交串行化：同一时刻只允许一次写入在途。
+   * 提交串行化 + **队列自己维护 revision**。
    *
-   * 为什么必须串行：每次写入都用 `modelRef.current.revision` 做乐观锁。若上一次
-   * 还没返回就发下一次，两次会带**同一个 revision**，第二次必然 409。
-   * 单选拖拽之间通常有间隔，撞上的概率低；框选后连续拖拽会把这个窗口放大，
-   * 于是表现为「多选拖拽松手后位置先乱跳、再回弹」——错误被 catch 成提示，
-   * 但卡片已经停在 pending 位置，直到 3 秒兜底才归位。
+   * 为什么必须串行：每次写入都带 `baseRevision` 做乐观锁。若上一次还没返回就发下一次，
+   * 两次会带同一个 revision，第二次必然 409。
    *
-   * 队列语义：后到的写入排在队尾，等前一次 `reload` 完成（拿到新 revision）
-   * 再执行。这样每次提交都基于最新版本，409 从根上消失。
+   * ## 为什么不能靠 `modelRef.current` 拿新 revision（这是 409 的真正根因）
+   *
+   * 原先的注释写着「等 `await canvas.reload()` 完成后 `modelRef.current` 就是新值」。
+   * **这不成立**：`reload()` 只是 `setState`，React 的重渲染在下一个任务里才发生，
+   * 而队列里的下一个 `run()` 是**同一个微任务链上立刻执行**的。于是它读到的仍是
+   * 旧 `modelRef`，带着已过期的 revision 发出去 → 服务端拒绝 → 409 刷屏。
+   *
+   * 用户的体感是「动一下就刷新」「框选拖拽后卡片丢了」，本质都是这串 409 引起的
+   * 连坐：写入失败 → 界面停在旧数据 → 卡片看起来消失。
+   *
+   * 修法：**不信 React 状态，直接信服务端返回值**。`PATCH` 响应里带 `revision`
+   * （见 `patchLayout` 的返回类型），把它记在 ref 里作为下一次写入的 base。
+   * ref 是同步的，不受渲染时机影响。
    */
   const writeChainRef = useRef<Promise<void>>(Promise.resolve());
+  /** 队列内部维护的「下一次写入应使用的 revision」；`null` 表示需要回落到模型。 */
+  const nextRevisionRef = useRef<number | null>(null);
+  /** `nextRevisionRef` 归属哪个工作区——切工作区后必须失效，否则会用别处的 revision 写。 */
+  const nextRevisionWorkspaceRef = useRef<string | null>(null);
 
   const submitPatches = useCallback(
     async (patches: Patch[]) => {
       if (patches.length === 0) return;
       const run = async (): Promise<void> => {
         const workspaceId = canvas.activeWorkspaceId;
-        /**
-         * **必须在队列内重新读** `modelRef.current`，不能在外面读好再闭包进来。
-         *
-         * 踩过的坑（409 Conflict 的唯一根因）：`run` 是排队执行的回调，前一次
-         * 写入 `await canvas.reload()` 之后 `model.revision` 才更新。如果在
-         * `submitPatches` 开头就把 `revision` 读进闭包，队列里排第二、第三的写入
-         * 全都带着**同一个旧 revision** 发出去 —— 服务端乐观锁逐个拒绝，
-         * 控制台就是刷屏的 `PATCH .../layout 409 (Conflict)`。
-         *
-         * 读 `modelRef.current`（每次渲染同步最新模型）就能拿到 reload 后的新值。
-         */
         const model = modelRef.current;
-        const revision = model?.revision;
+        /**
+         * revision 的取值顺序：
+         *   1. 队列自己记的（上一次 PATCH 的响应），**且必须属于同一个工作区**；
+         *   2. 回落到模型里的值（首次写入、或刚切过工作区）。
+         *
+         * 第 1 步是关键：它不依赖任何 React 状态更新时机。
+         */
+        const queuedRevision =
+          nextRevisionWorkspaceRef.current === workspaceId ? nextRevisionRef.current : null;
+        const revision = queuedRevision ?? model?.revision;
         const projectionEpoch = model?.projectionEpoch;
         if (workspaceId === null || typeof revision !== 'number') {
           // 没有工作区或没有版本号时**不假装保存成功**，明确告知用户。
@@ -145,16 +155,42 @@ export function App(): React.JSX.Element {
         setSaveError(null);
         try {
           const snapshot = snapshotFromPatches(patches);
-          await patchLayout(workspaceId, revision, {
+          const written = await patchLayout(workspaceId, revision, {
             projectionEpoch,
             layout: { cards: snapshot.cards, collapsed: snapshot.collapsed, viewport: snapshot.viewport },
             regions: snapshot.regions,
             annotations: snapshot.annotations,
           });
+          /**
+           * **先记 revision，再 reload**。
+           *
+           * 顺序不能反：`reload()` 会 `await` 一次网络往返，期间队列里可能已经有
+           * 下一个 `run` 在等。把 revision 记在 ref 里是同步的，必须趁现在做完。
+           *
+           * `written.revision` 缺失时（服务端没回这个字段）就**清空 ref**，
+           * 让下一次写入回落到模型值——宁可多等一次 reload，也不要拿一个
+           * 猜出来的 revision 去撞乐观锁。
+           */
+          if (typeof written.revision === 'number') {
+            nextRevisionRef.current = written.revision;
+            nextRevisionWorkspaceRef.current = workspaceId;
+          } else {
+            nextRevisionRef.current = null;
+            nextRevisionWorkspaceRef.current = null;
+          }
           setHistoryVersion(version => version + 1);
-          // 必须等 reload 落地：下一次排队的写入靠它拿到新 revision。
+          // reload 只为把服务端的最新投影拉回来给界面用，不再承担「传 revision」的职责。
           await canvas.reload();
         } catch (error) {
+          /**
+           * 写入失败后**必须让缓存的 revision 失效**。
+           *
+           * 若保留：下一次写入会带着一个「服务端从未确认过」的版本号继续撞 409；
+           * 若清空：下一次回落到模型里的 revision（来自最近一次成功的 reload），
+           * 至少是一个真实存在过的版本，有机会恢复。
+           */
+          nextRevisionRef.current = null;
+          nextRevisionWorkspaceRef.current = null;
           setSaveError(error instanceof Error ? error.message : String(error));
         } finally {
           setSaving(false);
@@ -214,6 +250,16 @@ export function App(): React.JSX.Element {
   /** 切换工作区时清空选中集：跨工作区的选中项没有意义，留着会误操作（FR-09.8 边界）。 */
   useEffect(() => {
     setSelectedCardIds([]);
+    /**
+     * 同时让队列缓存的 revision 失效。
+     *
+     * 每个工作区有自己的 revision 序列。若切换后仍用上一个工作区的号去写，
+     * 要么 409，要么（更糟）恰好撞上同号，把 A 的布局写到 B 上。
+     * `submitPatches` 里已经按 workspaceId 比对过，这里再清一次是为了
+     * 让「切回来」也不会复用旧值——那段时间里服务端可能已被别的路径改过。
+     */
+    nextRevisionRef.current = null;
+    nextRevisionWorkspaceRef.current = null;
   }, [canvas.activeWorkspaceId]);
 
   // historyVersion 只用于触发重渲染，让「撤销」按钮的可用态跟着历史变化。
