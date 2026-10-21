@@ -16,12 +16,22 @@ import { buildCanvasModel, type CanvasModel } from '../canvas/model.js';
 import { cloneLayout, type LayoutBundle, type LayoutBundleInput, type Patch } from '../canvas/commands.js';
 import { ROUTE_PREFIX } from '../shared/meta.js';
 
-/** 服务端 `GET /api/workspaces` 的响应形状。 */
+/**
+ * 服务端 `GET /api/workspaces` 的响应形状。
+ *
+ * `cwd` / `threadCount` 服务端 `summary()` 一直在返回（见 workspace-store），
+ * 只是前端类型此前没声明，导致顶栏无法按目录分组——只能把工作区名平铺成一排，
+ * 用户看到的是「所有会话都挤在顶栏」。
+ */
 export interface WorkspaceSummary {
   id: string;
   title?: string;
   revision?: number;
   updatedAt?: string;
+  /** 工作区对应的宿主目录；`null` 表示尚未绑定。 */
+  cwd?: string | null;
+  /** 该工作区内的会话（thread）数量。 */
+  threadCount?: number;
 }
 
 interface WorkspaceListResponse {

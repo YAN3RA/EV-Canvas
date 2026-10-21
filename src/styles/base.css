@@ -125,6 +125,21 @@ body,
   color: var(--evc-accent);
 }
 
+/*
+ * 目录按钮上的会话数徽标（UI-D10）。
+ * 顶栏现在是「目录选择器」：只有目录名时用户不知道里面有多少会话，
+ * 用一个弱化数字补上这个信息，不抢目录名的注意力。
+ */
+.evc-workbar-count {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--evc-border);
+  font-size: 11px;
+  line-height: 16px;
+  opacity: 0.75;
+}
+
 .evc-error {
   margin: 8px 12px;
   padding: 8px 10px;
