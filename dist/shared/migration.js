@@ -26,6 +26,41 @@ function assertObject(value, label) {
 }
 const requiredId = (value, label) => { if (typeof value !== 'string' || value === '')
     fail(`${label} 必须是非空字符串`); };
+/** 视口默认值。与 `schema.ts` 的冻结态默认一致（S1-8 视口迁移的回落目标）。 */
+const DEFAULT_VIEWPORT = Object.freeze({ x: 0, y: 0, zoom: 1 });
+/**
+ * 从旧版 `workspace.layout.viewport` 取出用户真实视口（S1-8 视口状态迁移）。
+ *
+ * 为什么必须有这一步：`WS_FIELDS` 只收 7 个标量字段，**不含 `layout`**，而后面又把
+ * `layout` 整块重置成默认值。缺了本函数，旧版用户的视口会被无条件抹平——实测旧版
+ * `'dsh-synapnova'` 是 `(-4604.1, 144.7, 1)`、`'agent-opt'` 是 `(-9383.5, -122.3, 1)`，
+ * 迁移后都变成 `(0,0,1)`，用户打开画布会跳回原点。
+ *
+ * 逐字段回落而不是整块放弃：旧版只缺 `zoom` 时，x/y 仍然可信，整块丢弃等于
+ * 把能救的部分也扔了。
+ *
+ * 非法值（非有限数、zoom<=0）**回落默认值而不是让迁移失败**：旧版数据是既成事实，
+ * 迁移的目标是「读得出来」。一个坏视口导致整份老工作区打不开，比丢一个视口更糟。
+ * 这与 `schema.ts` 的不变量 9（zoom 必须 > 0）不冲突——这里是在写入前把坏数据换成
+ * 合法默认值，而不是把坏数据放进冻结态。
+ *
+ * 注意本函数**只读视口**，不碰 `layout.cards`：旧版卡片坐标的来源是
+ * `thread.position`（已单独迁移），`layout.cards` 是浏览器布局快照，只有调用方
+ * 显式传 `browserLayout` 时才合并。两者混用会让坐标来源变得不可预测。
+ */
+function legacyViewportOf(layout) {
+    if (!object(layout))
+        return { ...DEFAULT_VIEWPORT };
+    const raw = layout['viewport'];
+    if (!object(raw))
+        return { ...DEFAULT_VIEWPORT };
+    const viewport = raw;
+    const x = typeof viewport['x'] === 'number' && Number.isFinite(viewport['x']) ? viewport['x'] : DEFAULT_VIEWPORT.x;
+    const y = typeof viewport['y'] === 'number' && Number.isFinite(viewport['y']) ? viewport['y'] : DEFAULT_VIEWPORT.y;
+    const rawZoom = viewport['zoom'];
+    const zoom = typeof rawZoom === 'number' && Number.isFinite(rawZoom) && rawZoom > 0 ? rawZoom : DEFAULT_VIEWPORT.zoom;
+    return { x, y, zoom };
+}
 const array = (value, label) => { if (!Array.isArray(value))
     fail(`${label} 必须是数组`); };
 const position = (value, label) => {
@@ -137,7 +172,7 @@ export function buildMigrationPlan({ legacyState, browserLayout, hostWorkspaces 
         workspace['revision'] = 1;
         workspace['projectionEpoch'] = 1;
         workspace['projection'] = { threads: [] };
-        workspace['layout'] = { cards: {}, collapsed: {}, viewport: { x: 0, y: 0, zoom: 1 } };
+        workspace['layout'] = { cards: {}, collapsed: {}, viewport: legacyViewportOf(source['layout']) };
         workspace['materials'] = [];
         workspace['regions'] = [];
         workspace['annotations'] = [];
