@@ -48,7 +48,7 @@ function snapshot(overrides = {}) {
     layout: {
       cards: { [questionCardId('t1', 1)]: { x: 500, y: 120 } },
       collapsed: { [questionCardId('t1', 1)]: true },
-      viewport: { x: 12, y: 34, zoom: 1.25 },
+      viewport: { x: 12, y: 34, zoom: 0.9 },
     },
     regions: [{ id: REGION_ID, name: '分区甲', x: 100, y: 50, w: 800, h: 400 }],
     annotations: [
@@ -117,7 +117,7 @@ describe('模型基础接口', () => {
     expect(isCardCollapsed(model, questionCardId('t1', 1))).toBe(true);
     expect(isCardCollapsed(model, questionCardId('t1', 0))).toBe(false);
     expect(getResolvedPosition(model, questionCardId('t1', 0))).toEqual({ x: 86, y: 82 });
-    expect(getViewport(model)).toEqual({ x: 12, y: 34, zoom: 1.25 });
+    expect(getViewport(model)).toEqual({ x: 12, y: 34, zoom: 0.9 });
     expect(getRegion(model, REGION_ID).name).toBe('分区甲');
     expect(getAnnotation(model, NOTE_ID).text).toBe('卡片旁注');
     expect(annotationsForCard(model, questionCardId('t1', 1)).map(note => note.id)).toEqual([NOTE_ID]);
@@ -200,38 +200,44 @@ describe('拖动手势', () => {
 describe('视口命令', () => {
   it('连续平移/缩放手势合并为一步', () => {
     const { history, bundle, apply } = historyFor();
+    // 缩放值全部落在 0.05–1 内：上限改为 100% 后，1.25 / 2.4 会被 clamp 掉，
+    // 那样这条用例测的就不再是「手势合并」而是「钳制」，失去原意。
     history.beginGesture('setViewport');
-    for (let step = 1; step <= 25; step++) history.updateGesture(history.commands.setViewport({ x: 12 - step * 4, y: 34 - step * 2, zoom: 1.25 }));
-    history.updateGesture(history.commands.setViewport({ x: -88, y: -16, zoom: 2.4 }));
+    for (let step = 1; step <= 25; step++) history.updateGesture(history.commands.setViewport({ x: 12 - step * 4, y: 34 - step * 2, zoom: 0.85 }));
+    history.updateGesture(history.commands.setViewport({ x: -88, y: -16, zoom: 0.6 }));
     const intent = history.endGesture();
     expect(history.undoDepth).toBe(1);
     apply(intent);
-    expect(bundle.viewport).toEqual({ x: -88, y: -16, zoom: 2.4 });
+    expect(bundle.viewport).toEqual({ x: -88, y: -16, zoom: 0.6 });
     expect(history.inspect().undo[0].patches.length).toBe(1);
     apply(history.undo());
-    expect(bundle.viewport).toEqual({ x: 12, y: 34, zoom: 1.25 });
+    expect(bundle.viewport).toEqual({ x: 12, y: 34, zoom: 0.9 });
     expect(history.undoDepth).toBe(0);
     expect(history.redoDepth).toBe(1);
   });
 
-  it('独立 setViewport 命令被夹到 vNext 的 0.05–5，并各记一步', () => {
-    // 旧 app.js 的钳制是 0.6–4；vNext 按 S1-9 与 constants.ts 改为 0.05–5，
-    // 与滚轮因子、滑杆范围严格一致。这条断言就是那次偏离的守卫。
+  it('独立 setViewport 命令被夹到 0.05–1，并各记一步', () => {
+    // 三次钳制区间的变迁，每一次都是用户裁定：
+    //   旧 app.js        0.6–4
+    //   vNext 首版(S1-9) 0.05–5   —— 对齐 Infinite Canvas
+    //   **现值**         0.05–1   —— 2026-10-21 用户要求「最大别超过 100%」，
+    //                              画布内容以会话卡片为主，放大超过 100% 只缩窄视野
+    // 这条断言就是区间偏离的守卫：改常量必须同步改它，否则说明有人动了钳制却没意识到。
     expect(MIN_ZOOM).toBe(0.05);
-    expect(MAX_ZOOM).toBe(5);
+    expect(MAX_ZOOM).toBe(1);
     const { history, bundle, apply } = historyFor();
     apply(history.commit(history.commands.setViewport({ zoom: 99 })));
     apply(history.commit(history.commands.setViewport({ x: -10, y: -20, zoom: 0.01 })));
     expect(bundle.viewport).toEqual({ x: -10, y: -20, zoom: 0.05 });
     expect(history.undoDepth).toBe(2);
     apply(history.undo());
-    expect(bundle.viewport).toEqual({ x: 12, y: 34, zoom: 5 });
+    expect(bundle.viewport).toEqual({ x: 12, y: 34, zoom: 1 });
   });
 
   it('缩放取到两位小数，与滑杆 1% 档一致', () => {
     const { history, apply, bundle } = historyFor();
-    apply(history.commit(history.commands.setViewport({ zoom: 1.23456789 })));
-    expect(bundle.viewport.zoom).toBe(1.23);
+    apply(history.commit(history.commands.setViewport({ zoom: 0.93456789 })));
+    expect(bundle.viewport.zoom).toBe(0.93);
   });
 });
 

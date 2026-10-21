@@ -49,15 +49,24 @@ export const ALLOWED_ASSET_MIME = [
   'audio/ogg',
 ] as const;
 
-/** 缩放钳制范围（与滑杆 min/max 严格一致，见 S1-9 参考清单） */
+/**
+ * 缩放钳制范围。
+ *
+ * **上限 1.0（100%）**：用户 2026-10-21 明确要求「最大放大到 100%，不要 500%」。
+ * 原先的 `MAX_ZOOM = 5` 来自 S1-9 参考清单（对齐 Infinite Canvas 的 `5–500%`），
+ * 但本项目画布内容以会话卡片为主，放大超过 100% 只会让视野变窄、没有信息收益。
+ * 下限保留 0.05：缩到 5% 才能纵览几十张卡片，这是实际需要的。
+ *
+ * 与滑杆 min/max **必须严格一致**，否则滑杆拖到端点会被 clamp 弹回（S1-9 已记录该坑）。
+ */
 export const MIN_ZOOM = 0.05;
-export const MAX_ZOOM = 5;
+export const MAX_ZOOM = 1;
 
 /** 滚轮缩放因子基数：每 100px deltaY 缩放 10% */
 export const WHEEL_ZOOM_BASE = 1.1;
 export const WHEEL_ZOOM_DIVISOR = 100;
 
-/** 滑杆范围（百分比） */
-export const ZOOM_SLIDER_MIN = 5;
-export const ZOOM_SLIDER_MAX = 500;
+/** 滑杆范围（百分比），由 MIN/MAX_ZOOM 派生，不单独维护 */
+export const ZOOM_SLIDER_MIN = Math.round(MIN_ZOOM * 100);
+export const ZOOM_SLIDER_MAX = Math.round(MAX_ZOOM * 100);
 export const ZOOM_SLIDER_STEP = 1;

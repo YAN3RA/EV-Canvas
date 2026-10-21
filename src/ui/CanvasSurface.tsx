@@ -29,9 +29,18 @@ import type { Patch } from '../canvas/commands.js';
 
 /** 滚轮缩放因子：`1.1^(Δ/100)`，取自 S1-9 实测参数。 */
 const WHEEL_FACTOR_BASE = 1.1;
-/** 滑杆范围（百分比），S1-9。 */
-const SLIDER_MIN = 5;
-const SLIDER_MAX = 500;
+/** 滑杆范围（百分比），跟随 constants 的 MIN/MAX_ZOOM。 */
+const SLIDER_MIN = Math.round(MIN_ZOOM * 100);
+const SLIDER_MAX = Math.round(MAX_ZOOM * 100);
+/** 网格步长（world 坐标，与 `base.css` 的 `background-size: 40px` 保持一致）。 */
+const GRID_SIZE = 40;
+/**
+ * 网格步长的视觉下限（屏幕像素）。
+ *
+ * 缩到很小的时候 `40 * zoom` 会趋近 0，网格密到糊成一片灰。低于这个值时
+ * 不再继续缩小步长——宁可让网格看起来「不再变密」，也不要变成噪声。
+ */
+const GRID_MIN_STEP_PX = 8;
 /** 判定「这是拖拽不是点击」的像素阈值；低于它按点击处理。 */
 const DRAG_THRESHOLD_PX = 3;
 /** 松手后等待模型追上目标位置的上限；超时即视为保存失败并释放预览。 */
@@ -552,6 +561,23 @@ export function CanvasSurface({
       <div
         ref={surfaceRef}
         className={`evc-canvas-surface${dragging ? ' is-dragging' : ''}`}
+        /**
+         * 网格跟随平移/缩放（UI-D8）。
+         *
+         * 为什么用内联 `backgroundSize` / `backgroundPosition` 而不是把网格画在
+         * `.evc-canvas-world` 里：world 层已经整体 `scale()` 了，网格若也放进去，
+         * 线条会跟着放大变粗（1px 变 5px），观感是「网格糊成一团」。这里只把
+         * 「步长」按 zoom 缩放、把「原点」按平移量偏移，线条本身始终 1px——
+         * 这是 Infinite Canvas 一类工具的标准做法（S1-9 参考清单同款）。
+         *
+         * 下限保护：zoom 极小时（0.05）步长会缩到 2px，密到发灰。所以设一个
+         * 视觉下限，低于它就不再把步长继续缩小，改为停止渲染细线——宁可网格消失，
+         * 不要糊成一片。
+         */
+        style={{
+          backgroundSize: `${Math.max(GRID_SIZE * transform.zoom, GRID_MIN_STEP_PX)}px ${Math.max(GRID_SIZE * transform.zoom, GRID_MIN_STEP_PX)}px`,
+          backgroundPosition: `${transform.x}px ${transform.y}px`,
+        }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endGesture}

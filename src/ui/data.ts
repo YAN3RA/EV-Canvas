@@ -77,6 +77,20 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
   const [state, setState] = useState<CanvasDataState>(EMPTY_STATE);
   /** 防止卸载后 setState（React 19 已不告警，但避免无谓工作）。 */
   const aliveRef = useRef(true);
+  /**
+   * 当前工作区 id 的**同步副本**。
+   *
+   * 为什么必须用 ref：`reload` 是 `useCallback`，依赖里**故意不含**
+   * `state.activeWorkspaceId`（否则每次切换工作区都会多一次全量 reload）。
+   * 于是 `reload` 体内读到的 `state.activeWorkspaceId` 永远是**首次渲染时**的值。
+   *
+   * 后果（这是 UI-D6「切换会话后一拖拽就被打回第一个会话」的根因）：
+   * 保存布局 → `await canvas.reload()` → 内部按过期闭包挑目标工作区 →
+   * 选中的是**第一个/旧的那个**工作区 → 界面被强行切走，拖拽状态跟着丢。
+   *
+   * ref 在每次 `loadWorkspace` 落地时同步写入，`reload` 读它拿到的必是最新值。
+   */
+  const activeWorkspaceIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -87,6 +101,7 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
 
   const loadWorkspace = useCallback(async (workspaceId: string | null) => {
     if (workspaceId === null) {
+      activeWorkspaceIdRef.current = null;
       if (aliveRef.current) {
         setState(previous => ({ ...previous, status: 'ready', model: null, activeWorkspaceId: null, error: null }));
       }
@@ -95,6 +110,8 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
     const document = await requestJson<WorkspaceDocument>(`/api/workspaces/${encodeURIComponent(workspaceId)}`);
     // 服务端返回的文档直接喂给纯函数模型；模型层负责校验与降级。
     const model = buildCanvasModel(document);
+    // 先写 ref 再 setState：保证 reload 在任何时刻都能拿到最新目标。
+    activeWorkspaceIdRef.current = workspaceId;
     if (aliveRef.current) {
       setState(previous => ({
         ...previous,
@@ -114,8 +131,9 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
       if (aliveRef.current) {
         setState(previous => ({ ...previous, workspaces }));
       }
-      // 选中优先级：显式指定 > 当前选中 > 列表第一个
-      const target = initialWorkspaceId ?? state.activeWorkspaceId ?? workspaces[0]?.id ?? null;
+      // 选中优先级：显式指定 > 当前选中（ref，见上）> 列表第一个。
+      // 读 ref 而不是 `state.activeWorkspaceId`：后者是过期闭包，会把用户打回首个工作区。
+      const target = initialWorkspaceId ?? activeWorkspaceIdRef.current ?? workspaces[0]?.id ?? null;
       await loadWorkspace(target);
     } catch (error) {
       if (aliveRef.current) {
@@ -126,8 +144,8 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
         }));
       }
     }
-    // state.activeWorkspaceId 故意不进依赖：只在首次/显式 reload 时决定默认目标，
-    // 否则每次切换都会触发一次多余的全量 reload。
+    // 依赖不含 `state.activeWorkspaceId`：reload 的身份应保持稳定，
+    // 当前工作区改由 `activeWorkspaceIdRef` 承载（见其声明处的说明）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialWorkspaceId, loadWorkspace]);
 

@@ -116,6 +116,17 @@ export function App(): React.JSX.Element {
       if (patches.length === 0) return;
       const run = async (): Promise<void> => {
         const workspaceId = canvas.activeWorkspaceId;
+        /**
+         * **必须在队列内重新读** `modelRef.current`，不能在外面读好再闭包进来。
+         *
+         * 踩过的坑（409 Conflict 的唯一根因）：`run` 是排队执行的回调，前一次
+         * 写入 `await canvas.reload()` 之后 `model.revision` 才更新。如果在
+         * `submitPatches` 开头就把 `revision` 读进闭包，队列里排第二、第三的写入
+         * 全都带着**同一个旧 revision** 发出去 —— 服务端乐观锁逐个拒绝，
+         * 控制台就是刷屏的 `PATCH .../layout 409 (Conflict)`。
+         *
+         * 读 `modelRef.current`（每次渲染同步最新模型）就能拿到 reload 后的新值。
+         */
         const model = modelRef.current;
         const revision = model?.revision;
         const projectionEpoch = model?.projectionEpoch;
