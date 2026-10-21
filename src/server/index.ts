@@ -385,6 +385,30 @@ function startSessionProjection(
       // 只记 warn 通道：宿主 logger 契约里没有 info，新增可选方法会变成空壳。
       host.logger.warn(new Error(`evcanvas: 历史回填补入 ${restored} 个会话`));
     }
+
+    /**
+     * 剔除宿主目录已不存在的 `dsh` 工作区（UI-D12）。
+     *
+     * 为什么必须在回填**之后**做：回填会给仍在磁盘上的会话重建投影，
+     * 如果先剔除再回填，被剔除行里的会话可能又被重新建回来，白做一遍。
+     *
+     * 为什么不能手改 `workspaces.json`：store 在内存里持有整份文档，
+     * 下一次保存会原样写回，手删的行会立刻复活（2026-10-21 实测验证过）。
+     * 只有走 store 自己的写路径才会真正落盘。
+     */
+    try {
+      const pruned = await store.pruneMissingDirectories();
+      if (pruned.length > 0) {
+        host.logger.warn(
+          new Error(`evcanvas: 已剔除 ${pruned.length} 个目录已不存在的工作区：${pruned.join('、')}`),
+        );
+      }
+    } catch (error) {
+      // 剔除失败不影响回填结果，但要说出来，不静默。
+      host.logger.warn(
+        new Error(`evcanvas: 剔除失效工作区失败（${error instanceof Error ? error.message : String(error)}）`),
+      );
+    }
   };
   void backfillFromDisk().catch(fail);
 }

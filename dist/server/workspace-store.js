@@ -18,6 +18,7 @@
  * 但允许写入；只在跨模块边界（`normalizeFrozenState` 的入参、方法返回值）做一次
  * 断言。**没有一处条件、错误文案、默认值或执行顺序被改动。**
  */
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
@@ -584,6 +585,54 @@ export class WorkspaceStore {
             this.state.hiddenSessionIds = [...hidden];
             this.state.workspaces = [];
             return { cleared: true };
+        });
+    }
+    /**
+     * Drop `dsh` workspaces whose host directory no longer exists (UI-D12).
+     *
+     * ## Why this has to live in the server, not in the data file
+     *
+     * Hand-editing `workspaces.json` to remove stale rows does not stick: the
+     * running store holds the whole document in memory and rewrites it wholesale
+     * on the next save, so the rows come straight back. The prune has to be a code
+     * path that runs **inside** the store, and it has to run again whenever the
+     * host's directory listing is refreshed.
+     *
+     * ## Why "directory missing" is the right signal
+     *
+     * A workspace is one host directory. Its sessions survive in DSH's own logs
+     * (`$DSH_HOME/sessions/…`) long after the directory is gone, so removing the
+     * canvas row loses only the projection and layout — never the conversation.
+     * Rows with a null `cwd` are left alone: nothing proves they are stale, and
+     * silently deleting unowned data is worse than showing an empty row.
+     *
+     * @param exists - injectable so tests need no real directories.
+     * @returns the titles that were dropped, for logging.
+     */
+    async pruneMissingDirectories(exists = existsSync) {
+        return this.mutate(() => {
+            const removed = [];
+            const kept = [];
+            for (const workspace of this.state.workspaces) {
+                const cwd = typeof workspace.cwd === 'string' && workspace.cwd !== '' ? workspace.cwd : null;
+                // Only rows that (a) claim to be host-backed and (b) name a directory we
+                // can actually test. Anything else stays untouched.
+                if (workspace.kind !== 'dsh' || cwd === null) {
+                    kept.push(workspace);
+                    continue;
+                }
+                if (exists(cwd)) {
+                    kept.push(workspace);
+                    continue;
+                }
+                // `title` 在类型上是可选的（旧数据可能缺）；缺的时候用目录名兜底，
+                // 反正这个返回值只用于日志，不该因此漏掉一行。
+                removed.push(typeof workspace.title === 'string' && workspace.title !== '' ? workspace.title : cwd);
+            }
+            if (removed.length === 0)
+                return removed;
+            this.state.workspaces = kept;
+            return removed;
         });
     }
     /** Replay one live DSH session into the dedicated projection workspace. */

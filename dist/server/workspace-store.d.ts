@@ -348,6 +348,29 @@ export declare class WorkspaceStore {
     }[]): Promise<{
         cleared: true;
     }>;
+    /**
+     * Drop `dsh` workspaces whose host directory no longer exists (UI-D12).
+     *
+     * ## Why this has to live in the server, not in the data file
+     *
+     * Hand-editing `workspaces.json` to remove stale rows does not stick: the
+     * running store holds the whole document in memory and rewrites it wholesale
+     * on the next save, so the rows come straight back. The prune has to be a code
+     * path that runs **inside** the store, and it has to run again whenever the
+     * host's directory listing is refreshed.
+     *
+     * ## Why "directory missing" is the right signal
+     *
+     * A workspace is one host directory. Its sessions survive in DSH's own logs
+     * (`$DSH_HOME/sessions/…`) long after the directory is gone, so removing the
+     * canvas row loses only the projection and layout — never the conversation.
+     * Rows with a null `cwd` are left alone: nothing proves they are stale, and
+     * silently deleting unowned data is worse than showing an empty row.
+     *
+     * @param exists - injectable so tests need no real directories.
+     * @returns the titles that were dropped, for logging.
+     */
+    pruneMissingDirectories(exists?: (dir: string) => boolean): Promise<string[]>;
     /** Replay one live DSH session into the dedicated projection workspace. */
     projectSession(session: ProjectableSession, replayFrom?: number, workspaceTitle?: string, projectionEpoch?: number, generation?: number): Promise<MutableThread | null>;
     /** Project one committed DSH session event. Repeated sequence numbers are ignored. */
