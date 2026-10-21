@@ -249,11 +249,11 @@ export function CanvasSurface({
    */
   useEffect(() => {
     if (pendingMove === null) return;
-    const startedAt = Date.now();
     const timer = setTimeout(() => setPendingMove(null), PENDING_MOVE_TIMEOUT_MS);
     return () => clearTimeout(timer);
-    // 依赖只留 pendingMove 的身份变化；`startedAt` 仅为可读性保留。
-    void startedAt;
+    // 依赖只留 pendingMove 的身份变化（`d3cd9e1` 起如此）。
+    // 曾经这里还留着一个 `startedAt` 常量，只为「可读性」而存在、从未被读取，
+    // 属于死代码，已删；需要计时就走 `[evc-drag]` 埋点里的 `performance.now()`。
   }, [pendingMove]);
 
   /** 提交视口变化。只在交互结束时落一次盘，避免拖拽过程中刷爆服务端。 */

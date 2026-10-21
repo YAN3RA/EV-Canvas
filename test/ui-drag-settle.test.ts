@@ -82,7 +82,15 @@ function renderedPosition(
   return modelPosition;
 }
 
-/** 与 `CanvasSurface` effect 同口径：模型是否已追上全部目标。 */
+/**
+ * 与 `CanvasSurface` 的 `pendingMoveActive` 同口径：模型是否已追上全部目标。
+ *
+ * 注意：`d3cd9e1` 起，这个判据在组件里是渲染期算的 `useMemo`，**不是 effect**。
+ * 本文件复刻的是它的判定式，不是它的执行时机——下面 `renderedPosition` 直接把
+ * `pending` 传进来、绕开 `pendingMoveActive`，所以**这里测不出 W2（settled 后
+ * model 回退导致旧 pending 复燃）**。要测那类时序问题必须真 DOM + 时间线，
+ * 见 [UI-D2-D3-埋点方案](../../Project%20Docs/3-开发测试/测试/UI-D2-D3-埋点方案.md)。
+ */
 function settled(model: Record<string, { x: number; y: number }>, pending: PendingMove): boolean {
   return pending.targets.every(target => {
     const position = model[target.cardId];
