@@ -159,6 +159,19 @@ export const CARD_ID_SEPARATOR = ':'
  */
 export const NATURAL_ORIGIN = Object.freeze({ x: 86, y: 82 })
 export const NATURAL_STEP_X = 365
+/**
+ * 会话之间的行距（world 坐标）。
+ *
+ * 数值必须等于 `layout.ts` 的 `CARD_HEIGHT + CARD_GAP_Y`（276 + 42），否则
+ * 「natural 排布」与「自动排版」两种布局对同一批卡片会算出不同的行高，用户在
+ * 按 HOME 前后会看到卡片行距突然变化。
+ *
+ * 为什么在这里重复定义而不 import `layout.ts`：`layout.ts` 已经 `import` 了本
+ * 模块（拿 `NATURAL_ORIGIN`/`NATURAL_STEP_X`），反向引用会形成循环依赖。
+ * 两边的一致性靠 `layout.ts` 里那行 `CARD_STEP_Y = CARD_HEIGHT + CARD_GAP_Y`
+ * 与 `model-natural-rows.test.ts` 的等值断言共同守住。
+ */
+export const NATURAL_STEP_Y = 318
 export const DEFAULT_VIEWPORT: Readonly<Viewport> = Object.freeze({ x: 0, y: 0, zoom: 1 })
 
 /** A card placeholder that stands for the whole thread (no user turns yet). */
@@ -372,10 +385,23 @@ function buildCards(threads: readonly unknown[], layout: LayoutView): { cards: C
   const threadsSummary: CanvasThreadSummary[] = []
   // Per-thread card list, needed to resolve a fork's inherited parent card.
   const cardsByThread = new Map<string, CanvasCard[]>()
+  /**
+   * 已排版会话的序号，用于把每个会话的未落位卡片**错开成一行**（UI-D13）。
+   *
+   * 为什么必须有它：下面每个线程的 `naturalPosition` 都从 `NATURAL_ORIGIN` 起算，
+   * 于是**所有会话的首张卡都落在同一个 (86, 82)**。29 个会话就是 29 张卡完全重叠
+   * ——用户看到的是「切目录后卡片堆在一起」，实际是一堆卡片坐标相同。
+   *
+   * 用会话序号做行偏移（y），会话内仍按提问顺序水平展开（x），正是用户要的
+   * 「按会话内顺序排列」。行高取 `CARD_STEP_Y`（卡片高 + 间隙），保证不重叠。
+   */
+  let threadRow = 0
   for (const thread of threads) {
     if (!isPlainObject(thread) || typeof thread.id !== 'string' || thread.id === '') continue
     const threadId = thread.id
     const turns = turnsOf(thread)
+    const rowOffset = threadRow * NATURAL_STEP_Y
+    threadRow += 1
     threadsSummary.push({
       id: threadId,
       title: projectedText(thread.dshSessionTitle ?? thread.title ?? ''),
@@ -384,7 +410,7 @@ function buildCards(threads: readonly unknown[], layout: LayoutView): { cards: C
       color: typeof thread.color === 'string' ? thread.color : null,
     })
     const firstId = turns.length === 0 ? threadCardId(threadId) : questionCardId(threadId, 0)
-    let previousNatural: Position = { ...NATURAL_ORIGIN }
+    let previousNatural: Position = { x: NATURAL_ORIGIN.x, y: NATURAL_ORIGIN.y + rowOffset }
     let previousId: string | null = null
     const threadCards: CanvasCard[] = []
     for (let index = 0; index < Math.max(turns.length, 1); index++) {
@@ -393,7 +419,9 @@ function buildCards(threads: readonly unknown[], layout: LayoutView): { cards: C
       // 两种写法在该循环内等价，只是把「线程无用户提问」这一事实挂在 turn 上。
       const id = turn === undefined ? firstId : questionCardId(threadId, turn.userQuestionSeq)
       const stored = layout.cards[id]
-      const naturalPosition: Position = index === 0 ? { ...NATURAL_ORIGIN } : { x: previousNatural.x + NATURAL_STEP_X, y: previousNatural.y }
+      const naturalPosition: Position = index === 0
+        ? { x: NATURAL_ORIGIN.x, y: NATURAL_ORIGIN.y + rowOffset }
+        : { x: previousNatural.x + NATURAL_STEP_X, y: previousNatural.y }
       const position: Position | null = stored === undefined ? null : { x: stored.x, y: stored.y }
       const card: CanvasCard = {
         id,

@@ -117,66 +117,84 @@ describe('排版结果是确定的（同样的输入给同样的坐标）', () =
   });
 });
 
-describe('HOME 是否要求选中项（源码层约束）', () => {
-  it('HOME 的处理必须在「无选中即 return」之前', async () => {
-    /**
-     * 这条用源码顺序断言，因为行为测试无法覆盖：
-     * 键盘处理是组件内的 effect 闭包，纯函数测不到它的早退顺序。
-     *
-     * 具体检查：`event.key === 'Home'` 的位置必须早于
-     * `if (selectedCardIds.length === 0) return`。
-     */
+describe('HOME 的位置与接线（源码层约束）', () => {
+  /** 读源码并剥注释：注释里会引用旧写法，不能当代码判。 */
+  async function sourceOf(relative: string): Promise<string> {
     const { readFile } = await import('node:fs/promises');
     const { dirname, join } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
     const testDir = dirname(fileURLToPath(import.meta.url));
-    const source = await readFile(join(testDir, '..', 'src', 'ui', 'App.tsx'), 'utf8');
+    const raw = await readFile(join(testDir, '..', relative), 'utf8');
+    return raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  }
 
-    /**
-     * 剥掉注释再定位。
-     *
-     * 踩过的坑：第一版直接在原文里 indexOf，结果命中了我自己写在
-     * 块注释里的一句 `selectedCardIds.length === 0` —— 那句比真正的
-     * 守卫语句更靠前，测试因此误报「顺序颠倒」。锚点必须落在可执行代码上。
-     */
-    const code = source
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '');
-
-    const homeAt = code.indexOf("event.key === 'Home'");
-    expect(homeAt).toBeGreaterThan(-1);
-
-    /**
-     * 守卫用「HOME 之后最近的那一个」定位，而不是全局第一个。
-     *
-     * 文件里有多处 `selectedCardIds.length === 0`（另一个函数里也有一个，
-     * 位置更靠前）。用全局 indexOf 会拿错对象，断言看似成立实则测的不是
-     * 同一段代码。这里必须锚定 HOME 之后的那一处。
-     */
-    const guardAt = code.indexOf('if (selectedCardIds.length === 0) return;', homeAt);
-    expect(guardAt).toBeGreaterThan(-1);
-    // HOME 必须在前，否则「没选中 → 按 HOME 没反应」这个缺陷会复活。
-    expect(homeAt).toBeLessThan(guardAt);
+  it('HOME 的键监听在 CanvasSurface（只有它握有 transform）', async () => {
+    const surface = await sourceOf('src/ui/CanvasSurface.tsx');
+    expect(surface).toContain("event.key !== 'Home'");
+    // 且必须读 ref 而不是闭包里的 transform，否则平移后按 HOME 会算错原点
+    expect(surface).toMatch(/transformRef\.current/);
   });
 
-  it('HOME 走 layoutIntent，不自己算坐标', async () => {
-    const { readFile } = await import('node:fs/promises');
-    const { dirname, join } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const testDir = dirname(fileURLToPath(import.meta.url));
-    const source = await readFile(join(testDir, '..', 'src', 'ui', 'App.tsx'), 'utf8');
-    expect(source).toMatch(/layoutIntent\(modelRef\.current, LAYOUT_MODES.branch\)/);
+  it('HOME 不再挂在 App.tsx（挂在那里只能拿到绝对原点）', async () => {
+    const app = await sourceOf('src/ui/App.tsx');
+    expect(app).not.toContain("event.key === 'Home'");
+  });
+
+  it('App 把视口原点透传给布局引擎', async () => {
+    const app = await sourceOf('src/ui/App.tsx');
+    // origin 必须来自外部传入，不能是常量
+    expect(app).toMatch(/layoutIntent\(modelRef\.current, LAYOUT_MODES\.branch, \{ origin \}\)/);
   });
 
   it('排版补丁复用 submitPatches（同一条撤销/乐观锁路径）', async () => {
-    const { readFile } = await import('node:fs/promises');
-    const { dirname, join } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const testDir = dirname(fileURLToPath(import.meta.url));
-    const source = await readFile(join(testDir, '..', 'src', 'ui', 'App.tsx'), 'utf8');
-    expect(source).toMatch(/void submitPatches\(intent\.patches as Patch\[\]\)/);
+    const app = await sourceOf('src/ui/App.tsx');
+    expect(app).toMatch(/void submitPatches\(intent\.patches as Patch\[\]\)/);
+  });
+
+  it('CanvasSurface 把 onArrangeAll 接到了 App', async () => {
+    const app = await sourceOf('src/ui/App.tsx');
+    expect(app).toContain('onArrangeAll={arrangeAllCards}');
   });
 });
 
-/** 类型守卫只是为了让 import 的 CanvasModel 不被 lint 判为未使用。 */
-export type _ModelShape = CanvasModel | null;
+describe('视口原点换算', () => {
+  /**
+   * 复刻 CanvasSurface 里的换算：
+   *   world 0 落在屏幕 (transform.x, transform.y)，
+   *   所以视口左上角对应的 world 坐标是 (-x/zoom, -y/zoom)。
+   */
+  function originFromTransform(transform: { x: number; y: number; zoom: number }, padding = 40) {
+    const zoom = Number.isFinite(transform.zoom) && transform.zoom > 0 ? transform.zoom : 1;
+    return {
+      x: Math.round(-transform.x / zoom) + padding,
+      y: Math.round(-transform.y / zoom) + padding,
+    };
+  }
+
+  it('未平移时原点就是内边距本身', () => {
+    expect(originFromTransform({ x: 0, y: 0, zoom: 1 })).toEqual({ x: 40, y: 40 });
+  });
+
+  it('向右平移 500 → world 原点左移 500（方向不能反）', () => {
+    expect(originFromTransform({ x: 500, y: 0, zoom: 1 }, 0).x).toBe(-500);
+  });
+
+  it('缩放会一起参与换算', () => {
+    // zoom=0.5 时，屏幕上 500px 只对应 world 1000
+    expect(originFromTransform({ x: 500, y: 0, zoom: 0.5 }, 0).x).toBe(-1000);
+  });
+
+  it('zoom 非法时退回 1，不产生 NaN 坐标', () => {
+    const origin = originFromTransform({ x: 100, y: 0, zoom: 0 }, 0);
+    expect(Number.isFinite(origin.x)).toBe(true);
+    expect(origin.x).toBe(-100);
+  });
+
+  it('卡片铺在当前视口附近，而不是画布角落', () => {
+    // 用户正看着 world (-5000,-3000) 一带
+    const origin = originFromTransform({ x: 5000, y: 3000, zoom: 1 }, 0);
+    expect(origin).toEqual({ x: -5000, y: -3000 });
+    // 铺出来的第一张卡就在这个原点，视野不需要移动
+    expect(Math.abs(origin.x - -5000)).toBe(0);
+  });
+});

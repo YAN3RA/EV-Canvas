@@ -96,6 +96,16 @@ export interface CanvasSurfaceProps {
   onSelectionChange: (ids: string[]) => void;
   /** 卡片拖拽落位；一次拖拽只提交一次，`dx/dy` 取整后的世界坐标位移。 */
   onMoveCards: (moves: { cardId: string; x: number; y: number }[]) => void;
+  /**
+   * HOME 键：把所有卡片重新排布到**当前视口**里（UI-D14）。
+   *
+   * 为什么由本组件发起而不是外层：只有这里同时持有 `transform`（当前平移/缩放）
+   * 与容器尺寸。外层拿不到「用户现在正看着 world 坐标的哪一点」，只能退回绝对
+   * 原点——那样按 HOME 会把视野甩到画布角落，正是用户报的问题。
+   *
+   * 参数是**已换算好的 world 原点**（当前视口左上角对应的 world 坐标）。
+   */
+  onArrangeAll: (origin: { x: number; y: number }) => void;
 }
 
 interface Transform {
@@ -156,6 +166,7 @@ export function CanvasSurface({
   selectedCardIds,
   onSelectionChange,
   onMoveCards,
+  onArrangeAll,
 }: CanvasSurfaceProps): React.JSX.Element {
   const viewport = model?.viewport ?? { x: 0, y: 0, zoom: 1 };
   const [transform, setTransform] = useState<Transform>({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
@@ -301,6 +312,40 @@ export function CanvasSurface({
     host.addEventListener('wheel', onWheelNative, { passive: false });
     return () => host.removeEventListener('wheel', onWheelNative);
   }, [applyTransform]);
+
+  /**
+   * HOME：把全部卡片排到**当前视口**里（UI-D14）。
+   *
+   * 换算方式：视口左上角在屏幕上的位置是 `(transform.x, transform.y)`，
+   * 而 world 坐标 0 就在屏幕的 `(transform.x, transform.y)` 处，所以
+   * 视口左上角对应的 world 坐标是 `(-x/zoom, -y/zoom)`。
+   *
+   * 为什么监听挂在这里而不是 App：只有这里同时握有 `transform` 与容器尺寸。
+   * App 拿不到「用户正看着哪儿」，只能退回绝对原点——那样按 HOME 会把视野
+   * 甩到画布角落。
+   *
+   * 用 ref 读 `transformRef`（而非闭包里的 `transform`）：keydown 监听只挂一次，
+   * 闭包捕获的会是首次渲染的值，用户平移之后按 HOME 就会算错原点。
+   */
+  useEffect(() => {
+    const onHomeKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Home') return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      // 输入框等获焦时让位：HOME 在文本框里是「跳到行首」。
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable === true) return;
+      event.preventDefault();
+      const current = transformRef.current;
+      const zoom = Number.isFinite(current.zoom) && current.zoom > 0 ? current.zoom : 1;
+      // 留一点内边距，让第一张卡不贴着视口左上角。
+      onArrangeAll({
+        x: Math.round(-current.x / zoom) + 40,
+        y: Math.round(-current.y / zoom) + 40,
+      });
+    };
+    window.addEventListener('keydown', onHomeKey);
+    return () => window.removeEventListener('keydown', onHomeKey);
+  }, [onArrangeAll]);
 
   /** 屏幕坐标 → world 坐标。框选与拖拽都要用。 */
   const toWorld = useCallback(
@@ -526,6 +571,46 @@ export function CanvasSurface({
     [selectable, selectedCardIds],
   );
 
+  /**
+   * 会话血缘连线的 SVG 路径（UI-D16）。
+   *
+   * 数据源是 `card.parentId`——它是同一会话内「上一张卡」的链接，由
+   * `buildCanvasModel` 在血缘分析阶段填好（`model.ts` 的 lineage pass）。
+   * 这里不重新推导血缘，只把已有的父子关系画出来，避免第二套判定。
+   *
+   * 几何：从父卡**右侧中点**连到子卡**左侧中点**，用三次贝塞尔（控制点水平
+   * 外推半个卡宽）画成柔和的 S 形。直线会让同一行内的连线与卡片边缘重叠，
+   * 看不出方向。
+   *
+   * 跳过条件：任一端点没有坐标（`getResolvedPosition` 返回 null，说明卡片
+   * 已被裁掉或数据缺失）时整条线不画——画一条悬空的线比不画更让人困惑。
+   */
+  const lineagePaths = useMemo(() => {
+    if (model === null) return [];
+    const byId = new Map<string, { x: number; y: number }>();
+    for (const { card, position } of placedCards) {
+      if (position !== null) byId.set(card.id, position);
+    }
+    const paths: { id: string; d: string }[] = [];
+    for (const { card } of placedCards) {
+      const parentId = card.parentId;
+      if (parentId === null || parentId === undefined) continue;
+      const from = byId.get(parentId);
+      const to = byId.get(card.id);
+      if (from === undefined || to === undefined) continue;
+      const x1 = from.x + CARD_WIDTH;
+      const y1 = from.y + CARD_HEIGHT / 2;
+      const x2 = to.x;
+      const y2 = to.y + CARD_HEIGHT / 2;
+      const bend = Math.max(40, Math.abs(x2 - x1) / 2);
+      paths.push({
+        id: parentId + '->' + card.id,
+        d: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`,
+      });
+    }
+    return paths;
+  }, [model, placedCards]);
+
   return (
     <div className="evc-canvas">
       <div className="evc-canvas-toolbar">
@@ -590,6 +675,26 @@ export function CanvasSurface({
             transformOrigin: '0 0',
           }}
         >
+          {/*
+           * 会话血缘连线（UI-D16，FR-12 的 `lineage` 一类）。
+           *
+           * 为什么画在 world 层内：连线必须跟着卡片一起平移缩放，画在外层就得
+           * 每帧自己换算坐标，多一处容易出错的重复实现。
+           *
+           * 为什么用 SVG 而不是 div 边框：血缘是折线（父卡右侧 → 子卡左侧），
+           * 用 div 拼要么变形要么留缝。SVG 的 `pointer-events: none` 也保证
+           * 连线不吃掉画布的拖拽/框选事件。
+           *
+           * 只画 `lineage`（系统生成、只读）。`context`/`input` 是用户手工连线，
+           * 需要交互（拉线、删除），不属于本次「只读渲染」范围。
+           */}
+          {lineagePaths.length > 0 ? (
+            <svg className="evc-lineage-layer" aria-hidden="true">
+              {lineagePaths.map(path => (
+                <path key={path.id} className="evc-lineage-edge" d={path.d} />
+              ))}
+            </svg>
+          ) : null}
           {placedCards.map(({ card, position }) => {
             if (position === null) return null;
             const selected = selectedSet.has(card.id);

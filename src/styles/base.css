@@ -217,6 +217,36 @@ body,
   /* transform 由 JS 控制；这里只保证子元素按 world 坐标定位 */
 }
 
+/*
+ * 会话血缘连线（UI-D16）。
+ *
+ * `position: absolute` + `inset: 0` 让 SVG 铺满整个 world 层；坐标用的是
+ * world 坐标，所以必须 `overflow: visible`——卡片常被摆到原点的负方向，
+ * 铺满 0,0 起点的画布会把那些线裁掉。
+ *
+ * `pointer-events: none` 是硬要求：连线覆盖在卡片之间，如果吃掉指针事件，
+ * 框选和空白处拖拽都会失效。
+ */
+.evc-lineage-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.evc-lineage-edge {
+  fill: none;
+  /* 比卡片边框淡一档：血缘是背景信息，不该抢卡片的注意力 */
+  stroke: var(--evc-border);
+  stroke-width: 2;
+  /* 缩放后依然清晰；`non-scaling-stroke` 靠 vector-effect 更稳，但 Safari 支持较晚 */
+  stroke-linecap: round;
+  opacity: 0.8;
+}
+
 .evc-card {
   position: absolute;
   display: flex;

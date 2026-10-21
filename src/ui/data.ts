@@ -83,6 +83,8 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
   reload: () => Promise<void>;
   selectWorkspace: (workspaceId: string) => Promise<void>;
+  /** 用写回响应里的 layout 就地更新模型；返回 false 时调用方应回落到 reload。 */
+  applyLayoutLocally: (workspaceId: string, layout: LayoutSnapshot, revision?: number | null) => boolean;
 } {
   const [state, setState] = useState<CanvasDataState>(EMPTY_STATE);
   /** 防止卸载后 setState（React 19 已不告警，但避免无谓工作）。 */
@@ -181,7 +183,47 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
     void reload();
   }, [reload]);
 
-  return { ...state, reload, selectWorkspace };
+  /**
+   * 用服务端回写的 `layout` 就地重建模型（UI-D15，M1 降低刷新频率）。
+   *
+   * ## 为什么要它
+   *
+   * 原先每次保存成功都 `await canvas.reload()`：重新拉 `/api/workspaces` 再拉
+   * 整份工作区文档。实测这份数据 18 MB、29 个会话——用户「动一下就刷新」的
+   * 体感就是它造成的，而且拖拽后的 selection box 要等 reload 回来才消失。
+   *
+   * `PATCH` 的响应里已经带了提交后的 `layout`（服务端 `updateLayout` 返回它），
+   * 所以本地可以直接重建模型，**省掉两次网络往返**。
+   *
+   * ## 为什么不干脆不刷新
+   *
+   * 模型里的 `revision` 必须跟着服务端走，否则下次写入会用旧 revision 撞 409。
+   * 这里把响应里的 `revision` 一并写进新模型，保持与磁盘一致。
+   *
+   * @returns 是否真的应用了（没有模型 / 工作区不匹配时返回 false，调用方回落到 reload）
+   */
+  const applyLayoutLocally = useCallback(
+    (workspaceId: string, layout: LayoutSnapshot, revision?: number | null): boolean => {
+      let applied = false;
+      setState(previous => {
+        const current = previous.model;
+        // 只更新「当前正在看、且属于同一工作区」的模型；其余情况让调用方走 reload，
+        // 免得把 A 的布局套到 B 上。
+        if (current === null || current.workspaceId !== workspaceId) return previous;
+        applied = true;
+        const next = buildCanvasModel({
+          ...(current as unknown as Record<string, unknown>),
+          layout,
+          ...(typeof revision === 'number' ? { revision } : {}),
+        });
+        return { ...previous, model: next };
+      });
+      return applied;
+    },
+    [],
+  );
+
+  return { ...state, reload, selectWorkspace, applyLayoutLocally };
 }
 
 /**
@@ -254,7 +296,7 @@ export async function patchLayout(
   workspaceId: string,
   baseRevision: number,
   options: PatchLayoutOptions,
-): Promise<{ revision?: number | null }> {
+): Promise<{ revision?: number | null; layout?: LayoutSnapshot }> {
   if (!Number.isInteger(baseRevision) || baseRevision < 1) {
     throw new Error('patchLayout: baseRevision 必须是不小于 1 的整数（服务端拒绝无版本号写入）');
   }

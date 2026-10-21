@@ -180,8 +180,21 @@ export function App(): React.JSX.Element {
             nextRevisionWorkspaceRef.current = null;
           }
           setHistoryVersion(version => version + 1);
-          // reload 只为把服务端的最新投影拉回来给界面用，不再承担「传 revision」的职责。
-          await canvas.reload();
+          /**
+           * 就地更新模型，**不再全量 reload**（UI-D15，M1）。
+           *
+           * 为什么能不 reload：`PATCH` 响应已经带回提交后的 `layout` 与 `revision`，
+           * 本地重建模型的结果与重新拉一次完全等价。原先每次拖拽都要重拉两次
+           * （列表 + 18 MB 的整份工作区文档），这是「动一下就刷新」的来源，
+           * 也让拖拽后的 selection box 要等一个往返才消失。
+           *
+           * 回落条件：只有当模型确实属于这个工作区时才就地应用。否则（刚切过
+           * 工作区、或模型尚未加载完）仍走 reload，避免把 A 的布局套到 B 上。
+           */
+          const applied =
+            written.layout !== undefined &&
+            canvas.applyLayoutLocally(workspaceId, written.layout, written.revision);
+          if (!applied) await canvas.reload();
         } catch (error) {
           /**
            * 写入失败后**必须让缓存的 revision 失效**。
@@ -312,12 +325,26 @@ export function App(): React.JSX.Element {
    * `selectedCardIds.length === 0` 时直接 return，但 HOME 恰恰是「没有选中项、
    * 也找不到卡片」时才最需要——顺序放反会让它在最该生效的场景里失效。
    */
-  const arrangeAllCards = useCallback(() => {
-    const intent = layoutIntent(modelRef.current, LAYOUT_MODES.branch);
+  /**
+   * 把全部卡片按自动布局排到 `origin` 处（UI-D14）。
+   *
+   * `origin` 由 `CanvasSurface` 换算后传进来：它是**当前视口左上角对应的 world
+   * 坐标**，不是画布绝对原点。
+   *
+   * 为什么必须这样：用户报「按 HOME 后卡片回到画布绝对坐标，我要的是回到我
+   * 当前画布位置的坐标」。布局引擎的 `origin` 语义就是「结果从哪开始铺」，
+   * 传绝对原点就会把卡片铺到 (86,82)——用户若正看着 world (-5000,-3000) 一带，
+   * 视野会瞬间跳到画布角落。
+   */
+  const arrangeAllCards = useCallback((origin: { x: number; y: number }) => {
+    const intent = layoutIntent(modelRef.current, LAYOUT_MODES.branch, { origin });
     if (intent.patches.length === 0) return;
     // 复用同一条提交路径：撤销栈、乐观锁、revision 跟踪都由它统一处理。
     void submitPatches(intent.patches as Patch[]);
   }, [submitPatches]);
+
+  const arrangeAllRef = useRef(arrangeAllCards);
+  arrangeAllRef.current = arrangeAllCards;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -326,12 +353,14 @@ export function App(): React.JSX.Element {
       const tag = target?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable === true) return;
 
-      // HOME 不要求选中项：它的用途正是「什么都不选也能把卡片找回来」。
-      if (event.key === 'Home') {
-        event.preventDefault();
-        arrangeAllCards();
-        return;
-      }
+      /**
+       * HOME 不再在这里处理 —— 它需要 `transform` 才能算出「当前视口在哪」，
+       * 而 `transform` 只存在于 `CanvasSurface` 内部。键监听已经下移到那里，
+       * 本处只保留「有选中项」的箭头微调。
+       *
+       * 保留这条注释是为了防止后人把 HOME 又挪回这里：那样拿到的是绝对原点，
+       * 按 HOME 会把视野甩到画布角落（用户已报过这个 bug）。
+       */
 
       if (selectedCardIds.length === 0) return;
 
@@ -349,7 +378,7 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [arrangeAllCards, nudgeSelection, selectedCardIds.length]);
+  }, [nudgeSelection, selectedCardIds.length]);
 
   const statusLabel = saving ? '保存中…' : canvas.status === 'loading' ? '加载中…' : null;
 
@@ -399,6 +428,7 @@ export function App(): React.JSX.Element {
           selectedCardIds={selectedCardIds}
           onSelectionChange={setSelectedCardIds}
           onMoveCards={moveCards}
+          onArrangeAll={arrangeAllCards}
         />
       )}
     </div>
