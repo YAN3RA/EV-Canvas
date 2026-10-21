@@ -23,7 +23,11 @@
     "dist/server",
     "dist/shared",
     "dist/ui",
+    "dist/canvas",
     "src/client",
+    "scripts/why.mjs",
+    "scripts/check-compatibility.mjs",
+    "compatibility.json",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -39,7 +43,12 @@
       ]
     }
   },
+  "bin": {
+    "evcanvas-why": "./scripts/why.mjs"
+  },
   "scripts": {
+    "why": "node scripts/why.mjs",
+    "check:compatibility": "node scripts/check-compatibility.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs && vite build",
     "build:server": "tsc -p tsconfig.server.json && node scripts/rewrite-alias.mjs",

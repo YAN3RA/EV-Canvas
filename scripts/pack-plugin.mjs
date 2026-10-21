@@ -2,8 +2,8 @@
  * 生成可安装的插件组合包（`release/dsh-evcanvas-<version>.tgz`）。
  *
  * 为什么需要：DSH 的插件从 GitHub / tgz 安装时，**不会替我们跑构建**。
- * 仓库里 `dist/` 被 gitignore，从远端装下来的只有源码——按 `package.json`
- * 的 `main`/`exports` 指过去全是空路径，装上也加载不起来。
+ * `dist/` 已随仓库交付；这里生成同样可安装的独立tgz，并补齐CLI运行文件。
+ * 仅改源码或 package.files 不会自动更新此组合包，实际归档须单独核验。
  *
  * 所以安装组合必须是「构建产物 + 清单」：
  *   dist/server/**   服务端入口与全部依赖（已由 rewrite-alias 处理过别名）
@@ -24,7 +24,7 @@ import { cp, mkdir, readFile, rm, writeFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 
 const ROOT = resolve(process.cwd());
@@ -38,11 +38,11 @@ const OUT_DIR = join(ROOT, 'release');
  * 写法，由宿主浏览器侧装载，不经过我们的构建），`package.json` 的
  * `exports['./client']` 直接指向它。漏掉它 = 侧栏永远没有入口。
  */
-const INCLUDE_DIRS = ['dist/server', 'dist/shared', 'dist/ui', 'src/client'];
+const INCLUDE_DIRS = ['dist/server', 'dist/shared', 'dist/ui', 'dist/canvas', 'src/client'];
 /** 单独拷贝的文件。 */
-const INCLUDE_FILES = ['cordis.patch.yml', 'README.md'];
-/** 运行时必需的 package.json 字段（`dsh` 必须保留：bundle 与 client 声明都在里面）。 */
-const KEEP_FIELDS = ['name', 'version', 'description', 'license', 'type', 'engines', 'main', 'exports', 'files', 'dsh'];
+const INCLUDE_FILES = ['cordis.patch.yml', 'README.md', 'compatibility.json', 'scripts/why.mjs', 'scripts/check-compatibility.mjs'];
+/** 运行时必需的 package.json 字段（dsh 与 CLI bin 都是实际入口）。 */
+const KEEP_FIELDS = ['name', 'version', 'description', 'license', 'type', 'engines', 'main', 'exports', 'files', 'dsh', 'bin'];
 
 async function exists(path) {
   try {
@@ -69,6 +69,7 @@ for (const dir of INCLUDE_DIRS) {
   await cp(join(ROOT, dir), join(STAGE, dir), { recursive: true });
 }
 for (const file of INCLUDE_FILES) {
+  await mkdir(dirname(join(STAGE, file)), { recursive: true });
   await cp(join(ROOT, file), join(STAGE, file));
 }
 
@@ -92,7 +93,7 @@ function tarHeader({ name, size, mode = 0o644, type = '0' }) {
   const header = Buffer.alloc(BLOCK, 0);
   const write = (offset, length, value) => header.write(value, offset, length, 'utf8');
   write(0, 100, name.slice(0, 100));
-  write(100, 8, '0000644\0'); // mode
+  write(100, 8, `${mode.toString(8).padStart(7, '0')}\0`); // mode
   write(108, 8, '0000000\0'); // uid
   write(116, 8, '0000000\0'); // gid
   write(124, 12, `${size.toString(8).padStart(11, '0')}\0`); // size
@@ -132,7 +133,11 @@ for (const { rel, full } of files) {
     console.error(`pack-plugin: 路径超过 100 字符，ustar 头放不下：${rel}`);
     process.exit(1);
   }
-  chunks.push(tarHeader({ name: `package/${rel}`, size: body.length }));
+  const binPaths = typeof manifest.bin === 'string'
+    ? [manifest.bin]
+    : Object.values(manifest.bin ?? {});
+  const executable = binPaths.some(path => typeof path === 'string' && path.replace(/^\.\//, '') === rel);
+  chunks.push(tarHeader({ name: `package/${rel}`, size: body.length, mode: executable ? 0o755 : 0o644 }));
   chunks.push(body);
   const pad = (BLOCK - (body.length % BLOCK)) % BLOCK;
   if (pad > 0) chunks.push(Buffer.alloc(pad, 0));

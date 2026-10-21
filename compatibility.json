@@ -1,0 +1,48 @@
+{
+  "$comment": "EV Canvas 宿主兼容声明（S3-13）。这是本仓库唯一的机器可读兼容权威，只描述**离线静态契约核对**。真实 GUI 跨版本矩阵不在本文件范围，不得据此声称运行期兼容。",
+  "schemaVersion": 1,
+  "package": {
+    "name": "dsh-evcanvas",
+    "pluginId": "evcanvas"
+  },
+  "requiredClientInject": [
+    "@deepseek-ai/dsh-client-ui-sidebar-right",
+    "@deepseek-ai/dsh-client-ui-session"
+  ],
+  "runtimeVerification": {
+    "performed": false,
+    "reason": "本轮只做离线静态核验；真实 GUI 跨版本兼容矩阵属于独立人工项，尚未执行。"
+  },
+  "declarations": [
+    {
+      "id": "dsh-desktop-0.2.1-rc.2-static",
+      "hostVersion": "0.2.1-rc.2",
+      "packageName": "dsh-evcanvas",
+      "packageVersion": "0.0.1",
+      "pluginId": "evcanvas",
+      "level": "static-contract-reviewed",
+      "runtimeVerified": false,
+      "evidence": [
+        {
+          "kind": "public-client-package",
+          "package": "@deepseek-ai/dsh-client-ui-session",
+          "version": "0.2.1-rc.2",
+          "method": "static-read"
+        },
+        {
+          "kind": "public-client-package",
+          "package": "@deepseek-ai/dsh-client-ui-sidebar-right",
+          "version": "0.2.1-rc.2",
+          "method": "static-read"
+        },
+        {
+          "kind": "public-client-package",
+          "package": "@deepseek-ai/dsh-client-ui-renderer",
+          "version": "0.2.1-rc.2",
+          "method": "static-read"
+        }
+      ],
+      "notes": "仅在源码层核对了 client 注入、包入口与 bundle patch 的形态；本轮新目标尚未做真实宿主 GUI 组合验收，不得写成「已支持」。"
+    }
+  ]
+}
