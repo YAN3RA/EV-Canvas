@@ -29,11 +29,13 @@ let opened: Opened[] = [];
 
 afterEach(async () => {
   for (const item of opened) {
-    try {
-      await item.store.releaseLock();
-    } catch {
-      /* 锁已释放或从未持有 */
-    }
+    // syncSessions 可延迟保存；先收尾自己的队列和定时器，再删夹具目录。
+    await item.store.ready;
+    await item.store.serial;
+    if (item.store.flushTimer !== null) clearTimeout(item.store.flushTimer);
+    item.store.flushTimer = null;
+    await item.store.flush();
+    await item.store.serial;
     await rm(item.dir, { recursive: true, force: true });
   }
   opened = [];

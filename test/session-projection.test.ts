@@ -1,10 +1,11 @@
 // @ts-nocheck -- 测试用假宿主 ctx 与会话对象，断言精确。
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { apply } from '@/server/index';
+import { WorkspaceStore } from '@/server/workspace-store';
 
 /**
  * S0-5 会话投影接线（`src/server/index.ts` → `startSessionProjection`）。
@@ -22,24 +23,42 @@ import { apply } from '@/server/index';
  */
 
 let dir;
+let stores: WorkspaceStore[];
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'evcanvas-proj-'));
+  const logs = join(dir, 'sessions');
+  await mkdir(logs);
+  // apply() 默认会后台回填磁盘历史；单测只能读取自己的空日志夹具。
+  vi.stubEnv('DSH_SESSIONS_DIR', logs);
+  stores = [];
+  const load = WorkspaceStore.prototype.load;
+  vi.spyOn(WorkspaceStore.prototype, 'load').mockImplementation(function () {
+    stores.push(this);
+    return load.call(this);
+  });
 });
 
 afterEach(async () => {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      await rm(dir, { recursive: true, force: true });
-      return;
-    } catch {
-      await new Promise(resolve => setTimeout(resolve, 50));
+  try {
+    await settle();
+    for (const store of stores) {
+      await store.ready;
+      await store.serial;
+      if (store.flushTimer !== null) clearTimeout(store.flushTimer);
+      store.flushTimer = null;
+      await store.flush();
+      await store.serial;
     }
+    await rm(dir, { recursive: true, force: true });
+  } finally {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   }
 });
 
 /** 造一个宿主会话：`events` 是它自己的快照，`inheritedEventCount` 是 fork 切口。 */
-function fakeSession({ id, title = null, cwd = '/work/proj', parentSession = null, events = [], inheritedEventCount = undefined }) {
+function fakeSession({ id, title = null, cwd = dir, parentSession = null, events = [], inheritedEventCount = undefined }) {
   return {
     id,
     title,
