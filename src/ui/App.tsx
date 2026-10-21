@@ -4,6 +4,7 @@ import { useCanvasData, patchLayout, readLayoutBundle, type WorkspaceSummary } f
 import { CanvasSurface } from './CanvasSurface.js';
 import { createCommandHistory, type Patch } from '../canvas/commands.js';
 import { getResolvedPosition } from '../canvas/model.js';
+import { LAYOUT_MODES, layoutIntent } from '../canvas/layout.js';
 
 /**
  * EV Canvas 前端主视图。
@@ -291,12 +292,47 @@ export function App(): React.JSX.Element {
     [history, selectedCardIds, submitPatches],
   );
 
+  /**
+   * HOME 键：把全部卡片按自动布局放回视野中心（UI-D11）。
+   *
+   * 用户的原话是「移动后找不到卡片难以寻找」。这是真实痛点：画布没有小地图
+   * （D14 已移除），卡片一旦被拖到视口外就只能靠滚轮盲找。所以给一个
+   * 「一键盘活」的出口。
+   *
+   * 两个设计取舍：
+   *
+   * 1. **走 `layoutIntent` 而不是自己算坐标**：自动排版已经有三套引擎
+   *    （横向 / 纵向 / 按分支），重写一份必然与 FR-09.1 走样。这里只挑一种模式
+   *    并保证它进撤销栈——用户按错了能 Ctrl+Z 回去。
+   *
+   * 2. **用 `byBranch` 而不是 `horizontal`**：画布内容是会话卡片，一个会话就是
+   *    一条链。按分支排版能把不同会话分开成行，比挤在一行里更容易扫视。
+   *
+   * 为什么 HOME 要放在「有选中项才响应」之前：下面那段箭头键处理在
+   * `selectedCardIds.length === 0` 时直接 return，但 HOME 恰恰是「没有选中项、
+   * 也找不到卡片」时才最需要——顺序放反会让它在最该生效的场景里失效。
+   */
+  const arrangeAllCards = useCallback(() => {
+    const intent = layoutIntent(modelRef.current, LAYOUT_MODES.branch);
+    if (intent.patches.length === 0) return;
+    // 复用同一条提交路径：撤销栈、乐观锁、revision 跟踪都由它统一处理。
+    void submitPatches(intent.patches as Patch[]);
+  }, [submitPatches]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       // 正文编辑、输入框、下拉等获焦时让位给宿主/系统。
       const tag = target?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable === true) return;
+
+      // HOME 不要求选中项：它的用途正是「什么都不选也能把卡片找回来」。
+      if (event.key === 'Home') {
+        event.preventDefault();
+        arrangeAllCards();
+        return;
+      }
+
       if (selectedCardIds.length === 0) return;
 
       const step = event.shiftKey ? 10 : 1;
@@ -313,7 +349,7 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [nudgeSelection, selectedCardIds.length]);
+  }, [arrangeAllCards, nudgeSelection, selectedCardIds.length]);
 
   const statusLabel = saving ? '保存中…' : canvas.status === 'loading' ? '加载中…' : null;
 
