@@ -380,6 +380,12 @@ export function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [nudgeSelection, selectedCardIds.length]);
 
+  /** 当前工作区的摘要（用于只读标题；顶栏目录已移除，见渲染处注释）。 */
+  const activeWorkspace = useMemo(() => {
+    const id = canvas.activeWorkspaceId;
+    if (id === null) return null;
+    return canvas.workspaces.find(item => item.id === id) ?? null;
+  }, [canvas.activeWorkspaceId, canvas.workspaces]);
   const statusLabel = saving ? '保存中…' : canvas.status === 'loading' ? '加载中…' : null;
 
   return (
@@ -397,11 +403,23 @@ export function App(): React.JSX.Element {
         </button>
       </header>
 
-      <WorkspaceBar
-        workspaces={canvas.workspaces}
-        activeId={canvas.activeWorkspaceId}
-        onSelect={id => void canvas.selectWorkspace(id)}
-      />
+      {/*
+       * 顶栏目录已移除（UI-D19）。
+       *
+       * 用户原话：「把目录删掉，直接用宿主栏的对话即可」。现在的工作方式：
+       * 在宿主左侧栏点一个会话 → 打开「无限画布」→ `conversation.view` 槽位
+       * 通过 `scope.cwd` 把目录传进 iframe URL（`?cwd=`）→ 画布自动定位到该
+       * 会话所在的工作区。
+       *
+       * 保留一个**只读**的当前目录标识：用户仍需要知道「我看的是哪个目录的画布」。
+       * 但不提供切换按钮——切换的权威在宿主侧栏，画布另造一套目录选择器会变成
+       * 第二份目录权威（AGENTS §5.2）。
+       */}
+      {activeWorkspace !== null ? (
+        <div className="evc-canvas-caption" title={activeWorkspace.cwd ?? undefined}>
+          {activeWorkspace.title ?? '未命名工作区'}
+        </div>
+      ) : null}
 
       {canvas.status === 'error' ? (
         <div className="evc-error" role="alert">
@@ -431,72 +449,6 @@ export function App(): React.JSX.Element {
           onArrangeAll={arrangeAllCards}
         />
       )}
-    </div>
-  );
-}
-
-/** 工作区切换条。 */
-function WorkspaceBar({
-  workspaces,
-  activeId,
-  onSelect,
-}: {
-  workspaces: WorkspaceSummary[];
-  activeId: string | null;
-  onSelect: (id: string) => void;
-}): React.JSX.Element {
-  if (workspaces.length === 0) {
-    return <div className="evc-workbar evc-muted">无工作区</div>;
-  }
-  /**
-   * 顶栏按**目录**分组，不把工作区名平铺成一排（UI-D10）。
-   *
-   * 用户反馈「所有会话都展示在顶栏」——实际列的是 7 个工作区，但每个工作区
-   * 就是宿主里一个目录，用户读到的是「一堆陌生名字挤成一行」。
-   *
-   * 现在的语义：
-   *   - 顶栏 = 目录选择器。每个按钮 = 一个 cwd，副标题显示该目录下会话数。
-   *   - 选中目录后，画布内容是该目录内的会话卡片（投影本来就按工作区分好的）。
-   *
-   * 为什么不在顶栏再嵌套一层会话下拉：宿主侧栏已有会话树，画布顶栏重复一份
-   * 会变成第二套目录权威（AGENTS §5.2 明确禁止）。画布内用卡片表达会话即可。
-   *
-   * 目录归并：`cwd` 相同的行合并成一个按钮。理论上 S0-7 修复后同 cwd 不该多行，
-   * 但历史数据里可能存在，合并是**展示层**的兜底，不改数据。
-   */
-  const groups = new Map<string, { cwd: string | null; items: WorkspaceSummary[] }>();
-  for (const item of workspaces) {
-    const key = item.cwd ?? item.id;
-    const bucket = groups.get(key);
-    if (bucket === undefined) groups.set(key, { cwd: item.cwd ?? null, items: [item] });
-    else bucket.items.push(item);
-  }
-  const directoryLabel = (cwd: string | null, fallback: string): string => {
-    if (cwd === null || cwd === '') return fallback;
-    // 只取最后一段目录名：完整路径太长，顶栏放不下，也让人读不过来。
-    const parts = cwd.split(/[\\/]/).filter(Boolean);
-    return parts[parts.length - 1] ?? cwd;
-  };
-
-  return (
-    <div className="evc-workbar">
-      {[...groups.entries()].map(([key, group]) => {
-        const active = group.items.some(item => item.id === activeId);
-        const threads = group.items.reduce((total, item) => total + (item.threadCount ?? 0), 0);
-        const primary = group.items.find(item => item.id === activeId) ?? group.items[0]!;
-        return (
-          <button
-            key={key}
-            type="button"
-            className={active ? 'is-active' : undefined}
-            title={group.cwd ?? primary.title ?? primary.id}
-            onClick={() => onSelect(primary.id)}
-          >
-            {directoryLabel(group.cwd, primary.title ?? primary.id)}
-            <span className="evc-workbar-count">{threads}</span>
-          </button>
-        );
-      })}
     </div>
   );
 }

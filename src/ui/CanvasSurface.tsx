@@ -572,24 +572,60 @@ export function CanvasSurface({
   );
 
   /**
+   * 一张卡片**当前画在哪儿**（world 坐标）—— 卡片与连线共用这一个函数（UI-D17/D18）。
+   *
+   * 为什么必须抽出来：卡片渲染时会在 `position` 之上叠两层临时位移
+   * （拖拽中的 `dragPreview`、松手后的 `pendingMove`），而连线原先直接用静止的
+   * `position`，于是拖拽时卡片动了、线还钉在原处，松手刷新后才追上。
+   * 只要有一处「按静止坐标画」，两个东西就必然会分开。
+   *
+   * 优先级（这是第 4 条「框选后拖不动」的修法）：
+   *   1. **`dragPreview` 优先**：手指还按着时，用户的意图是唯一权威。
+   *      原先是 `pendingMove` 优先，而框选后一次拖拽会留下 pendingMove（等模型
+   *      追上），下一个拖拽开始时它仍然生效，把新位移整个盖住 —— 表现为
+   *      「框选后拖不动，要等 3 秒兜底超时才恢复」。
+   *   2. `pendingMove`：松手后接力，让卡片停在目标位等模型追上。
+   *   3. 静止 `position`：常态。
+   *
+   * 用绝对坐标而非叠相对位移的理由见下面 `pendingMove` 分支的注释。
+   */
+  const resolveDrawnPosition = useCallback(
+    (
+      cardId: string,
+      base: { x: number; y: number },
+      preview: { dx: number; dy: number } | null,
+      pending: { targets: { cardId: string; x: number; y: number }[] } | null,
+    ): { x: number; y: number } => {
+      // 拖拽中：以卡片起点 + 相对位移为准，忽略待定目标。
+      if (preview !== null) return { x: base.x + preview.dx, y: base.y + preview.dy };
+      const pinned = pending?.targets.find(target => target.cardId === cardId);
+      if (pinned !== undefined) return { x: pinned.x, y: pinned.y };
+      return base;
+    },
+    [],
+  );
+
+  /**
    * 会话血缘连线的 SVG 路径（UI-D16）。
    *
-   * 数据源是 `card.parentId`——它是同一会话内「上一张卡」的链接，由
-   * `buildCanvasModel` 在血缘分析阶段填好（`model.ts` 的 lineage pass）。
-   * 这里不重新推导血缘，只把已有的父子关系画出来，避免第二套判定。
+   * 数据源是 `card.parentId`——同一会话内「上一张卡」的链接，由
+   * `buildCanvasModel` 的血缘分析阶段填好。这里不重新推导血缘，只把已有关系画出来。
    *
-   * 几何：从父卡**右侧中点**连到子卡**左侧中点**，用三次贝塞尔（控制点水平
-   * 外推半个卡宽）画成柔和的 S 形。直线会让同一行内的连线与卡片边缘重叠，
-   * 看不出方向。
+   * **坐标走 `resolveDrawnPosition`**，与卡片渲染同一套：拖拽/松手期间线会跟着
+   * 卡片一起动，而不是等刷新后才追上（用户报的「连线不跟随拖拽」）。
    *
-   * 跳过条件：任一端点没有坐标（`getResolvedPosition` 返回 null，说明卡片
-   * 已被裁掉或数据缺失）时整条线不画——画一条悬空的线比不画更让人困惑。
+   * 几何：父卡右侧中点 → 子卡左侧中点，三次贝塞尔（控制点水平外推半个卡宽）
+   * 画成 S 形；直线会与卡片边框重叠，看不出方向。
+   *
+   * 跳过条件：任一端点没有坐标时整条线不画——悬空的线比不画更让人困惑。
    */
   const lineagePaths = useMemo(() => {
     if (model === null) return [];
     const byId = new Map<string, { x: number; y: number }>();
     for (const { card, position } of placedCards) {
-      if (position !== null) byId.set(card.id, position);
+      if (position === null) continue;
+      const preview = dragPreview !== null && selectedSet.has(card.id) ? dragPreview : null;
+      byId.set(card.id, resolveDrawnPosition(card.id, position, preview, pendingMoveActive));
     }
     const paths: { id: string; d: string }[] = [];
     for (const { card } of placedCards) {
@@ -609,7 +645,7 @@ export function CanvasSurface({
       });
     }
     return paths;
-  }, [model, placedCards]);
+  }, [model, placedCards, dragPreview, pendingMoveActive, selectedSet, resolveDrawnPosition]);
 
   return (
     <div className="evc-canvas">
@@ -699,18 +735,21 @@ export function CanvasSurface({
             if (position === null) return null;
             const selected = selectedSet.has(card.id);
             /**
-             * 拖拽中：相对位移叠在当前位置上。
+             * 卡片画在哪儿 —— 与连线共用 `resolveDrawnPosition`，保证两者永不分离。
              *
-             * 松手后（pendingMove）：**直接用绝对目标坐标**，不叠相对位移。
-             * 这一点踩过：叠相对位移时，模型一旦追上（position 已变成目标），
-             * 再叠一次 dx/dy 就会多移一倍 —— 卡片会二次跳动。绝对坐标在
-             * 「模型未追上」和「已追上」两种状态下都指向同一个位置，天然无跳变。
+             * 这里的优先级修正（UI-D18）是「框选后拖不动」的根治：
+             * 原先 `pinned`（pendingMove 的绝对目标）高于 `draggingThis`（本次拖拽
+             * 的相对位移）。框选一次拖拽后会留下 pendingMove，等模型追上才释放；
+             * 在这个窗口里再拖同一批卡片，新位移会被旧的 pinned 整个盖住 ——
+             * 用户看到的就是「框选后拖不动，得等几秒才恢复」。
+             *
+             * 现在 `dragPreview`（手指还按着）永远优先：正在进行的拖拽是唯一权威。
              */
-            const draggingThis = dragPreview !== null && selectedSet.has(card.id) ? dragPreview : null;
-            const pinned = pendingMoveActive?.targets.find(target => target.cardId === card.id) ?? null;
-            const moving = draggingThis !== null || pinned !== null;
-            const left = pinned !== null ? pinned.x : position.x + (draggingThis?.dx ?? 0);
-            const top = pinned !== null ? pinned.y : position.y + (draggingThis?.dy ?? 0);
+            const preview = dragPreview !== null && selectedSet.has(card.id) ? dragPreview : null;
+            const drawn = resolveDrawnPosition(card.id, position, preview, pendingMoveActive);
+            const moving = preview !== null || drawn.x !== position.x || drawn.y !== position.y;
+            const left = drawn.x;
+            const top = drawn.y;
             return (
               <article
                 key={card.id}

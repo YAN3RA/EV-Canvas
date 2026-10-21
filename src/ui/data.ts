@@ -143,9 +143,29 @@ export function useCanvasData(initialWorkspaceId?: string): CanvasDataState & {
       if (aliveRef.current) {
         setState(previous => ({ ...previous, workspaces }));
       }
-      // 选中优先级：显式指定 > 当前选中（ref，见上）> 列表第一个。
-      // 读 ref 而不是 `state.activeWorkspaceId`：后者是过期闭包，会把用户打回首个工作区。
-      const target = initialWorkspaceId ?? activeWorkspaceIdRef.current ?? workspaces[0]?.id ?? null;
+      /**
+       * 选中优先级：显式传入 > URL 里的 `?cwd=` > 当前选中（ref）> 列表第一个。
+       *
+       * `?cwd=` 来自客户端壳：宿主在 `conversation.view` 槽位里把当前会话的
+       * `scope.cwd` 拼进 iframe URL（见 `src/client/index.js` 的 `CanvasBody`）。
+       * 有它，画布就能自动定位到用户正在看的那个会话所在目录，
+       * 顶栏那排目录按钮因此可以去掉（UI-D19）。
+       *
+       * 为什么 `?cwd=` 要排在 ref 之前：用户点了另一个会话，就是明确要换画布；
+       * ref 里的「上次选中」不该覆盖这个意图。
+       *
+       * 用 `cwd` 而不是 sessionId 作键：画布的工作区就是目录，列表接口已经带
+       * `cwd`，前端直接匹配即可，不需要新增按会话反查工作区的接口。
+       *
+       * 读 ref 而不是 `state.activeWorkspaceId`：后者是过期闭包，会把用户打回首个工作区。
+       */
+      const cwdParam = typeof location !== 'undefined'
+        ? new URLSearchParams(location.search).get('cwd')
+        : null;
+      const byCwd = cwdParam === null || cwdParam === ''
+        ? null
+        : workspaces.find(item => typeof item.cwd === 'string' && item.cwd === cwdParam)?.id ?? null;
+      const target = initialWorkspaceId ?? byCwd ?? activeWorkspaceIdRef.current ?? workspaces[0]?.id ?? null;
       await loadWorkspace(target);
     } catch (error) {
       if (aliveRef.current) {

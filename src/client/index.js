@@ -64,9 +64,35 @@ window.__ModuleLoader__.load({
      * 代价是 iframe 与宿主之间不能直接共享状态——数据都走 HTTP，
      * 这本来就符合「不新增第二权威」的约束。
      */
-    function CanvasBody() {
+    /**
+     * 画布正文：用 iframe 承载已经构建好的 SPA。
+     *
+     * ## 焦点会话透传（UI-D19）
+     *
+     * 宿主在 `conversation.view` 槽位里会给组件传一个 `scope`：
+     * `{ sessionId, cwd }`（见宿主 `SessionScope` 契约）。这就是用户此刻在
+     * 左侧栏选中的那个会话。
+     *
+     * 把它拼进 iframe URL 后，画布可以**自动定位到该会话所在的工作区**，
+     * 于是顶栏那排目录按钮就不需要了——用户说的是「直接用宿主栏的对话即可」。
+     *
+     * 为什么用 URL 而不是 postMessage：iframe 与宿主之间还没有桥接通道
+     * （ADR-0003 只是规格，未实现）。URL 查询参数是最小可行方案，且天然
+     * 支持刷新后恢复、支持用户手改地址排错。
+     *
+     * `cwd` 而非 `sessionId` 作键：画布的工作区就是目录，服务端列表接口
+     * 已经带 `cwd`，前端可直接匹配，不需要新接口。
+     */
+    function CanvasBody({ scope } = {}) {
+      const cwd = scope !== null && typeof scope === 'object' ? scope.cwd : undefined;
+      const src =
+        typeof cwd === 'string' && cwd !== ''
+          ? PAGE_URL + '?cwd=' + encodeURIComponent(cwd)
+          : PAGE_URL;
       return React.createElement('iframe', {
-        src: PAGE_URL,
+        // key 让 cwd 变化时重建 iframe：换会话时不应残留上一个会话的视图状态。
+        key: src,
+        src,
         title: DISPLAY_NAME,
         // 占满右栏；样式走内联，避免向宿主页面注入全局 CSS
         style: {
@@ -121,13 +147,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 对话顶栏「视图」的正文：与主面板是同一个画布，只是挂的位置不同。
+     * 对话顶栏「视图」的正文：与主面板同一个画布，但**能拿到 scope**。
      *
-     * 保留这一处是因为它同样是有用的入口（不离开会话就能切到画布），
-     * 且与左栏主面板渲染同一份内容，不存在第二套状态。
+     * 这是 UI-D19 的关键入口：`conversation.view` 由宿主在会话上下文中渲染，
+     * 会把 `scope = { sessionId, cwd }` 传进来。有这个 cwd 才能把画布自动定位
+     * 到用户正在看的那个会话，从而去掉顶栏那排目录按钮。
+     *
+     * 左侧栏主面板（`CanvasPanel`）没有 scope —— 它不属于任何会话，所以只显示
+     * 一个默认工作区。这是宿主槽位语义决定的，不是本插件能改的。
+     *
+     * **`scope` 必须给默认值**：`CanvasBody` 里对它做对象解构，宿主在部分渲染
+     * 路径下（以及测试里）不传参，缺默认值会直接抛
+     * `Cannot destructure property 'scope' of 'undefined'` —— 那是整块白屏，
+     * 不是降级。默认 `{}` 让画布退回默认工作区，仍然可用。
      */
-    function CanvasView() {
-      return CanvasBody();
+    function CanvasView({ scope } = {}) {
+      return CanvasBody({ scope });
     }
 
     return {
