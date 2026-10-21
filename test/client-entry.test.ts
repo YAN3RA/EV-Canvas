@@ -111,6 +111,56 @@ describe('客户端入口', () => {
     expect(element.props.src).toBe('/evcanvas/');
   });
 
+  it('对话视图将 cwd 安全编码为单个查询参数，并以 URL 作 iframe key', async () => {
+    const { registered } = await loadClient();
+    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+    const cwd = 'C:/项目 A/#草稿?x=1&y=2';
+    const element = view.component({ scope: { sessionId: 'session-a', cwd } });
+    expect(element.props.src).toBe('/evcanvas/?cwd=' + encodeURIComponent(cwd));
+    expect(new URL(element.props.src, 'https://host.invalid').searchParams.get('cwd')).toBe(cwd);
+    expect(element.props.key).toBe(element.props.src);
+    expect(element.props.src).not.toContain('session-a');
+  });
+
+  it('不同 cwd 产生不同 iframe key，避免复用上一目录画面', async () => {
+    const { registered } = await loadClient();
+    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+    const a = view.component({ scope: { sessionId: 'a', cwd: 'C:/work/a' } });
+    const b = view.component({ scope: { sessionId: 'b', cwd: 'C:/work/b' } });
+    expect(a.props.src).not.toBe(b.props.src);
+    expect(a.props.key).not.toBe(b.props.key);
+  });
+
+  it('同 cwd 切换 sessionId 不改变当前 URL（尚未接会话定位）', async () => {
+    const { registered } = await loadClient();
+    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+    const a = view.component({ scope: { sessionId: 'a', cwd: 'C:/work' } });
+    const b = view.component({ scope: { sessionId: 'b', cwd: 'C:/work' } });
+    expect(a.props.src).toBe(b.props.src);
+    expect(a.props.key).toBe(b.props.key);
+  });
+
+  it('缺省、空或非字符串 cwd 回退入口页，不生成无效查询参数', async () => {
+    const { registered } = await loadClient();
+    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+    for (const props of [undefined, {}, { scope: null }, { scope: {} }, { scope: { cwd: '' } }, { scope: { cwd: 42 } }]) {
+      const element = view.component(props);
+      expect(element.type).toBe('iframe');
+      expect(element.props.src).toBe('/evcanvas/');
+      expect(element.props.key).toBe('/evcanvas/');
+    }
+  });
+
+  it('当前主面板没有透传 scope：不能用对话视图用例代替主面板验收', async () => {
+    const { registered } = await loadClient();
+    const main = registered.slots.find(item => item.options.name === 'main');
+    const view = registered.slots.find(item => item.options.name === 'conversation.view');
+    const props = { scope: { sessionId: 'a', cwd: 'C:/work' } };
+    const panel = main.component(props);
+    expect(panel.children[0].props.src).toBe('/evcanvas/');
+    expect(view.component(props).props.src).toBe('/evcanvas/?cwd=C%3A%2Fwork');
+  });
+
   it('注册右栏标签类型，只认领自己的地址前缀', async () => {
     const { registered } = await loadClient();
     expect(registered.tabs).toHaveLength(1);
