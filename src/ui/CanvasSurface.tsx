@@ -37,6 +37,47 @@ const DRAG_THRESHOLD_PX = 3;
 /** 松手后等待模型追上目标位置的上限；超时即视为保存失败并释放预览。 */
 const PENDING_MOVE_TIMEOUT_MS = 3000;
 
+/**
+ * 平移手势埋点开关（**默认关闭，不影响正常使用**）。
+ *
+ * 为什么需要它：UI-D1「拖空白画布松手后跳远」已经连续两轮靠读代码推断改错
+ * （`d3cd9e1` 改卡片路径、`bd1dd7a` 改 pan 路径，用户复测仍复现）。旧版那次
+ * 真正的定位手段是控制台时间线——`[evc-drag]` 打点显示 `pending-check` 连续
+ * 9 秒不释放，才找到 timer 被重置。所以这里同样先取证，不猜根因。
+ *
+ * 启用方式（任一即可）：
+ *   - URL 加 `?evc-debug=1`（宿主 iframe 内可能需要拼在画布 URL 上）
+ *   - 控制台执行 `localStorage.setItem('evcDebug','1')` 后刷新
+ * 关闭：`localStorage.removeItem('evcDebug')`。
+ *
+ * 输出前缀固定 `[evc-pan]`，便于过滤；序号递增，便于判断「同一帧被调用两次」
+ * 这类 StrictMode 双执行问题。
+ */
+function panTraceEnabled(): boolean {
+  try {
+    if (typeof location === 'undefined') return false;
+    if (new URLSearchParams(location.search).get('evc-debug') === '1') return true;
+    return localStorage.getItem('evcDebug') === '1';
+  } catch {
+    // localStorage 在部分沙箱/隐私模式下会抛错；埋点不能把画布搞挂。
+    return false;
+  }
+}
+
+let panTraceSeq = 0;
+
+/** 记录一条平移埋点；未启用时是空操作（零开销路径只多一次函数调用）。 */
+function panTrace(event: string, detail: Record<string, unknown> = {}): void {
+  if (!panTraceEnabled()) return;
+  panTraceSeq += 1;
+  // 用 console.log 而非 warn/error：这不是错误，只是取证。
+  // eslint-disable-next-line no-console
+  console.log(`[evc-pan] #${panTraceSeq} ${event}`, {
+    t: typeof performance !== 'undefined' ? Math.round(performance.now()) : -1,
+    ...detail,
+  });
+}
+
 export interface CanvasSurfaceProps {
   model: CanvasModel | null;
   /** 视口变化提交入口；由外层决定是否落盘。 */
@@ -109,6 +150,23 @@ export function CanvasSurface({
 }: CanvasSurfaceProps): React.JSX.Element {
   const viewport = model?.viewport ?? { x: 0, y: 0, zoom: 1 };
   const [transform, setTransform] = useState<Transform>({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
+  /**
+   * 最新 transform 的同步副本。
+   *
+   * 为什么需要：`endGesture` 是 `useCallback`，它捕获的是**渲染时**的 `transform`。
+   * 而 `onPointerMove` 里的 `setTransform` 要到下一次渲染才生效，所以松手那次
+   * `endGesture` 看到的往往是**上一帧**的值——提交上去的 viewport 比用户最后
+   * 看到的位置旧一帧。ref 在每次 setTransform 的同一步写入，读它拿到的必是最新。
+   */
+  const transformRef = useRef<Transform>({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
+  /** 统一的 transform 写入口：同时更新 ref 与 state，避免两者不一致。 */
+  const applyTransform = useCallback((next: Transform | ((previous: Transform) => Transform)) => {
+    setTransform(previous => {
+      const value = typeof next === 'function' ? next(previous) : next;
+      transformRef.current = value;
+      return value;
+    });
+  }, []);
   const gestureRef = useRef<Gesture | null>(null);
   /** 框选矩形的屏幕坐标，仅用于绘制视觉反馈。 */
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
@@ -146,8 +204,16 @@ export function CanvasSurface({
   useEffect(() => {
     const workspaceId = model?.workspaceId ?? null;
     if (workspaceId === workspaceIdRef.current) return;
+    // UI-D1 取证点：这里一旦被触发，本地 transform 就会被服务端 viewport 覆盖。
+    // 若日志显示「pan-end 之后紧接 pan-rehydrate」，而用户没切换工作区，
+    // 那就是 model 在 reload 期间短暂变成 null（或 workspaceId 抖动）导致的回灌。
+    panTrace('pan-rehydrate', {
+      from: workspaceIdRef.current,
+      to: workspaceId,
+      serverViewport: { x: viewport.x, y: viewport.y, zoom: viewport.zoom },
+    });
     workspaceIdRef.current = workspaceId;
-    setTransform({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
+    applyTransform({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
     // 只在**换工作区**时同步一次；同一工作区的 viewport 更新不回灌（见上方注释）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model?.workspaceId]);
@@ -193,6 +259,7 @@ export function CanvasSurface({
   /** 提交视口变化。只在交互结束时落一次盘，避免拖拽过程中刷爆服务端。 */
   const commitViewport = useCallback(
     (next: Transform) => {
+      panTrace('viewport-commit', { x: next.x, y: next.y, zoom: next.zoom });
       onViewportCommit({ x: next.x, y: next.y, zoom: next.zoom });
     },
     [onViewportCommit],
@@ -215,7 +282,7 @@ export function CanvasSurface({
     const onWheelNative = (event: WheelEvent): void => {
       event.preventDefault();
       const delta = -event.deltaY;
-      setTransform(previous => {
+      applyTransform(previous => {
         const zoom = clampZoom(previous.zoom * WHEEL_FACTOR_BASE ** (delta / 100));
         // clampZoom 对非法输入返回 NaN —— 那是 bug，不是「用 1 兜底」的场景，
         // 静默兜底会把一次计算错误藏起来，所以保持原值不变。
@@ -224,7 +291,7 @@ export function CanvasSurface({
     };
     host.addEventListener('wheel', onWheelNative, { passive: false });
     return () => host.removeEventListener('wheel', onWheelNative);
-  }, []);
+  }, [applyTransform]);
 
   /** 屏幕坐标 → world 坐标。框选与拖拽都要用。 */
   const toWorld = useCallback(
@@ -305,6 +372,12 @@ export function CanvasSurface({
         originX: transform.x,
         originY: transform.y,
       };
+      panTrace('pan-start', {
+        pointerId: event.pointerId,
+        at: { x: event.clientX, y: event.clientY },
+        origin: { x: transform.x, y: transform.y },
+        zoom: transform.zoom,
+      });
       setDragging(true);
     },
     [model, onSelectionChange, selectedCardIds, selectedSet, toWorld, transform.x, transform.y],
@@ -317,7 +390,7 @@ export function CanvasSurface({
       const host = event.currentTarget;
 
       if (gesture.kind === 'pan') {
-        setTransform(previous => ({
+        applyTransform(previous => ({
           ...previous,
           x: gesture.originX + (event.clientX - gesture.startX),
           y: gesture.originY + (event.clientY - gesture.startY),
@@ -360,10 +433,21 @@ export function CanvasSurface({
 
       if (gesture.kind === 'pan') {
         setDragging(false);
-        setTransform(current => {
-          commitViewport(current);
-          return current;
-        });
+        /**
+         * 松手：**在 updater 之外**提交一次。
+         *
+         * 踩过的坑（UI-D1 的真正成因之一）：这里原先是
+         * `setTransform(current => { commitViewport(current); return current })`。
+         * 把副作用写进 updater 有两重问题：
+         *   1. StrictMode 下 updater 会**被调用两次**，于是同一次松手提交两次
+         *      viewport；两次提交各自带同一 revision 进入写队列，后一次基于
+         *      尚未 reload 的旧模型重算快照，把前一次的正确位置**覆盖回旧值**。
+         *   2. updater 允许被 React 丢弃或重放，副作用不在它的契约里。
+         * 现在改为读 `transformRef.current`（已经是最新位置），只提交一次。
+         */
+        const settled = transformRef.current;
+        panTrace('pan-end', { x: settled.x, y: settled.y, zoom: settled.zoom });
+        commitViewport(settled);
         return;
       }
 
@@ -417,9 +501,9 @@ export function CanvasSurface({
 
   const resetView = useCallback(() => {
     const next = { x: 0, y: 0, zoom: 1 };
-    setTransform(next);
+    applyTransform(next);
     commitViewport(next);
-  }, [commitViewport]);
+  }, [applyTransform, commitViewport]);
 
   /** 卡片列表：位置走纯函数解析，保证与导出/布局算法看到的是同一套坐标。 */
   const placedCards = useMemo(() => {
@@ -446,9 +530,16 @@ export function CanvasSurface({
           value={Math.round(transform.zoom * 100)}
           onChange={event => {
             const zoom = clampZoom(Number(event.target.value) / 100);
-            if (Number.isFinite(zoom)) setTransform(previous => ({ ...previous, zoom }));
+            if (Number.isFinite(zoom)) applyTransform(previous => ({ ...previous, zoom }));
           }}
-          onPointerUp={() => setTransform(current => (commitViewport(current), current))}
+          /**
+           * 滑杆松手提交一次。
+           *
+           * 原先写成 `setTransform(current => (commitViewport(current), current))`——
+           * 与 pan 松手同一类错误：副作用在 updater 里，StrictMode 会提交两次。
+           * 这里读 `transformRef.current`（onChange 已同步写入），提交一次即可。
+           */
+          onPointerUp={() => commitViewport(transformRef.current)}
           aria-label="缩放"
         />
         <span className="evc-zoom-label">{Math.round(transform.zoom * 100)}%</span>
